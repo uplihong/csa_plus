@@ -1,0 +1,4 @@
+# __target__: csref.model.ContrastiveSemanticAlignment
+_target_: csref.modeling.csa.ContrastiveSemanticAlignment
+speech_encoder: ${speech_encoder}
+text_encoder: ${text_encoder}

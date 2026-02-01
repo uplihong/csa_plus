@@ -1,0 +1,6 @@
+_target_: csref.data.dataset.LibriSpeechDataset
+root_dir: "data/LibriSpeech/LibriSpeech"
+train_split: "train"
+max_durations: null
+use_trim: true
+target_sample_rate: 16000

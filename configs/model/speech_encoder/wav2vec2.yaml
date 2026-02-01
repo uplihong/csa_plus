@@ -1,0 +1,12 @@
+_target_: csref.modeling.speech_encoder.Wav2vec2
+# _target_: csref.model.speech_encoder.wav2vec2.Wav2vec2
+hidden_size: 768
+flat_glimpses: 1
+dropout_rate: 0.1
+target_sr: 16000
+pretrained_path: "data/weights/wav2vec2-base"
+freeze_model: True
+use_one_hidden_state_as_feat: True
+hidden_state_index: -1
+use_att_flat_mask: True
+freeze_layers: False  # just freeze feature feature encoders

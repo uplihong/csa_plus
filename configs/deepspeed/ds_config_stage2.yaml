@@ -1,0 +1,59 @@
+# deepspeed_config stage 2
+#train_batch_size: 128
+micro_batch_per_gpu: 32
+#gradient_acc_step: 1
+steps_per_print: 4
+optimizer:
+  type: Adam
+  params:
+    lr: 0.0001
+    betas: [0.8, 0.999]
+    eps: 1e-8
+    weight_decay: 3e-7
+scheduler:
+  type: WarmupCosineLR
+  params:
+    total_num_steps: 1e5
+    warmup_min_ratio: 0
+    warmup_num_steps: 1e4
+    cos_min_ratio: 1e-4
+gradient_clipping: 1.0
+prescale_gradients: False
+fp16:
+  enabled: true
+  auto_cast: False
+  loss_scale: 0
+  initial_scale_power: 16
+  loss_scale_window: 1000
+  hysteresis: 2
+  consecutive_hysteresis: False
+  min_loss_scale: 1
+wall_clock_breakdown: False
+zero_optimization:
+  stage: 2
+  contiguous_gradients: true
+  reduce_scatter: true
+  reduce_bucket_size: 5e8
+#  use_multi_rank_bucket_allreduce: true
+  allgather_partitions: true
+  allgather_bucket_size: 5e8
+  overlap_comm: true
+#  load_from_fp32_weights: true
+
+#  offload_param:
+#    device: cpu
+
+  offload_optimizer:  # todo: why/is enable "offload_optimizer" caused hang?
+    device: cpu
+
+#    pin_memory: true  # todo: why/is enable "pin_memory" caused hang?
+
+#  memory_efficient_linear: true
+
+tensorboard:
+  enabled: true
+  output_path: ???
+
+#dataloader_drop_last: True  # drop last batch if it's not full, this is important for distributed training
+
+

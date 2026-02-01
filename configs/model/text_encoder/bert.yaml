@@ -1,0 +1,6 @@
+# _target_: csref.model.text_encoder.Bert
+_target_: csref.modeling.text_encoder.Bert
+#pretrained_path: "data/weights/bert-large-uncased"
+pretrained_path: "data/weights/bert-base-uncased"
+freeze_model: True
+hidden_state_index: -1

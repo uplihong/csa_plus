@@ -1,0 +1,2 @@
+_target_: transformers.Wav2Vec2FeatureExtractor.from_pretrained
+pretrained_model_name_or_path: ${model.speech_encoder.pretrained_path}

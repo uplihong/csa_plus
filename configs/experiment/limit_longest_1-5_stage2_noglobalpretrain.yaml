@@ -1,0 +1,54 @@
+# @package _global_
+experiment_name: limit_longest_random_cut_1-5_stage2_batch128_no_offload_noglobalpretrain  # 20000 steps收敛时性能较优
+# experiment_name: nolimit_nocut_stage2_batch128_no_offload  
+experiment_output_dir: outputs/${experiment_name}/${now:%Y-%m-%d}/${now:%H-%M}
+
+
+deepspeed_config_yaml:
+#  train_batch_size: 96
+#  micro_batch_per_gpu: 24
+#  train_batch_size: 128
+  gradient_accumulation_steps: 1
+#  micro_batch_per_gpu: 128
+  train_micro_batch_size_per_gpu: 128
+
+  zero_optimization:
+    offload_optimizer: null
+
+  tensorboard:
+    output_path: ${experiment_output_dir}
+    job_name: ${experiment_name}
+
+
+train:
+  seed: 123456
+#  min_max_audio_second: [1.0, 6.0]
+  min_max_audio_second: [1.0, 5.0]
+  # 训练好的CSA模型，在此基础上进一步cut audio训练
+  pretrained_model_checkpoint: /data/huanglh/huggingface/wav2vec2-base
+  tensorboard_dir: ${experiment_output_dir}
+  max_step_iterations: ${deepspeed_config_yaml.scheduler.params.total_num_steps}
+
+  checkpoint_every_steps: 1000
+  validation_every_steps: 5000
+  log_every_steps: 4
+
+  evaluation:
+    eval_batch_size: 32  # in csa this is set to 32
+    sequential: false
+
+  data:
+    num_workers: 0
+    pin_memory: true
+
+
+
+hydra:
+  run:
+    # dir: outputs/${experiment_name}/${now:%Y-%m-%d}/${now:%H-%M}
+    dir: ${experiment_output_dir}
+  verbose: false
+
+
+# 25.6.10
+# deepspeed --no_local_rank --include localhost:1,2  pretrain_csa_ds_limit_longest_loadfromwav2vec2.py +experiment=limit_longest_1-5_stage2_noglobalpretrain.yaml

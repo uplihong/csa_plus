@@ -1,0 +1,19 @@
+defaults:
+  - _self_
+  # - local_rank: 0
+  - model: csa_extracted_text_features
+  - model/speech_encoder@audio_preprocessor: wav2vec2_preprocessor
+  - model/speech_encoder: wav2vec2
+  - deepspeed@deepspeed_config_yaml: ds_config_stage3
+#  - deepspeed@deepspeed_config_yaml: ds_config_stage1
+  - dataset: librispeech
+
+
+deepspeed: true
+local_rank: 0
+
+train:
+  seed: 123456
+  epochs: 100
+
+extracted_text_features_path: /data/huanglh/code/ContrastiveAT/output/transcript2feature_bert-base.lh
