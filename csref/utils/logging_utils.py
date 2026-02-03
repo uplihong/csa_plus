@@ -3,9 +3,7 @@ import os
 import sys
 from typing import Optional
 
-from .distributed import is_rank_0
-
-def setup_logger(name: str = "csref", output_dir: Optional[str] = None, rank: int = 0) -> logging.Logger:
+def setup_logger(name: str = "csref", output_dir: Optional[str] = None, rank: Optional[int] = None) -> logging.Logger:
     """
     Sets up a logger that prints to console and optionally to a file.
     Only rank 0 logs to console/file by default, but this can be configured.
@@ -21,6 +19,10 @@ def setup_logger(name: str = "csref", output_dir: Optional[str] = None, rank: in
     formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
+
+    if rank is None:
+        # Prefer global rank when available; fallback to local rank for pre-init launcher paths.
+        rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")))
 
     # Console Handler (only for rank 0 to avoid clutter)
     if rank == 0:

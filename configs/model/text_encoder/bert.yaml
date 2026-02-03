@@ -4,3 +4,4 @@ _target_: csref.modeling.text_encoder.Bert
 pretrained_path: "data/weights/bert-base-uncased"
 freeze_model: True
 hidden_state_index: -1
+gradient_checkpointing: False # set to True to save memory at the cost of compute

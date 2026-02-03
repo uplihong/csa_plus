@@ -53,17 +53,17 @@ class LibriSpeechDataset(Dataset):
                 logger.warning(f"Split path does not exist: {split_path}")
                 continue
 
-            for speaker in os.listdir(split_path):
+            for speaker in sorted(os.listdir(split_path)):
                 speaker_path = os.path.join(split_path, speaker)
                 if not os.path.isdir(speaker_path): continue
                 
-                for chapter in os.listdir(speaker_path):
+                for chapter in sorted(os.listdir(speaker_path)):
                     chapter_path = os.path.join(speaker_path, chapter)
                     if not os.path.isdir(chapter_path): continue
 
                     transcripts_dict = {}
                     # First pass: read transcripts
-                    for file in os.listdir(chapter_path):
+                    for file in sorted(os.listdir(chapter_path)):
                         if file.endswith('.txt'):
                             file_path = os.path.join(chapter_path, file)
                             try:
@@ -77,7 +77,7 @@ class LibriSpeechDataset(Dataset):
                                 logger.warning(f"Error reading transcript {file_path}: {e}")
 
                     # Second pass: match audio to transcript
-                    for file in os.listdir(chapter_path):
+                    for file in sorted(os.listdir(chapter_path)):
                         if file.endswith('.flac'):
                             file_path = os.path.join(chapter_path, file)
                             file_id = file.split('.')[0]

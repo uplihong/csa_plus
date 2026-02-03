@@ -31,10 +31,16 @@ def build_train_librispeech_loader(cfg, dataset: torch.utils.data.Dataset, shuff
     # Determine batch size
     # Check if we are using DeepSpeed config or standard config
     if hasattr(cfg, 'deepspeed_config_yaml'):
-        # total_batch_size = cfg.deepspeed_config_yaml.train_batch_size
-        micro_batch_size = cfg.deepspeed_config_yaml.micro_batch_per_gpu
+        ds_cfg = cfg.deepspeed_config_yaml
+        micro_batch_size = ds_cfg.get("train_micro_batch_size_per_gpu", None)
+        if micro_batch_size is None:
+            micro_batch_size = cfg.train.batch_size // num_tasks
     else:
         micro_batch_size = cfg.train.batch_size // num_tasks
+
+    micro_batch_size = int(micro_batch_size)
+    if micro_batch_size <= 0:
+        raise ValueError(f"Invalid train micro batch size: {micro_batch_size}")
 
     sampler = DistributedSampler(
         dataset,
@@ -65,9 +71,9 @@ def build_test_librispeech_loader(cfg, dataset: torch.utils.data.Dataset, shuffl
         num_tasks = 1
         global_rank = 0
 
-    eval_batch_size = cfg.train.evaluation.eval_batch_size
+    eval_batch_size = int(cfg.train.evaluation.eval_batch_size)
     # Per GPU
-    eval_micro_batch_size = eval_batch_size // num_tasks
+    eval_micro_batch_size = max(1, eval_batch_size // num_tasks)
 
     if cfg.train.evaluation.sequential:
         # SequentialSampler doesn't support distributed split usually, assume run on rank 0 or full eval
@@ -107,6 +113,9 @@ class InfiniteIterator:
     def __init__(self, loader: DataLoader):
         self.loader = loader
         self.iterator = iter(self.loader)
+        self.epoch = 0
+        if hasattr(self.loader.sampler, "set_epoch"):
+            self.loader.sampler.set_epoch(self.epoch)
 
     def __iter__(self):
         return self
@@ -115,6 +124,9 @@ class InfiniteIterator:
         try:
             batch = next(self.iterator)
         except StopIteration:
+            self.epoch += 1
+            if hasattr(self.loader.sampler, "set_epoch"):
+                self.loader.sampler.set_epoch(self.epoch)
             self.iterator = iter(self.loader)
             batch = next(self.iterator)
         return batch

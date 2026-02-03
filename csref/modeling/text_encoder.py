@@ -9,6 +9,7 @@ class Bert(nn.Module):
             pretrained_path: str = "data/weights/bert-base-uncased",
             freeze_model: bool = True,
             hidden_state_index: int = -1,
+            gradient_checkpointing: bool = False,
     ):
         super(Bert, self).__init__()
 
@@ -18,6 +19,9 @@ class Bert(nn.Module):
 
         if freeze_model:
             self.frozen(self.model)
+
+        if gradient_checkpointing:
+            self.model.gradient_checkpointing_enable()
 
     def frozen(self, module: nn.Module):
         if hasattr(module, 'module'):

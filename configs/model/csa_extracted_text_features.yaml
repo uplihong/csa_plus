@@ -1,3 +1,0 @@
-# __target__: csref.model.ContrastiveSemanticAlignmentExtractedTextFeatures
-_target_: csref.model.csa_extracted_text_features.ContrastiveSemanticAlignmentExtractedTextFeatures
-speech_encoder: ${speech_encoder}

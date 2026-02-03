@@ -29,12 +29,45 @@ CSRef_2.0/
    pip install -r requirements.txt
    ```
 
+3. if using Conda environment, please also install:
+   ```
+   conda install -y openmpi mpi4py
+   ```
+
 ## Dataset
 
 This project uses the LibriSpeech dataset. Ensure you have the dataset downloaded and extracted.
 Update `configs/dataset/librispeech.yaml` with the correct `root_dir`:
 ```yaml
 root_dir: "/path/to/LibriSpeech"
+```
+
+## Weights
+
+This project uses the `bert-base-uncased` and `wav2vec2-base` pretrained weights.
+
+```
+git clone https://huggingface.co/google-bert/bert-base-uncased
+git clone https://huggingface.co/facebook/wav2vec2-base
+```
+
+Update `configs/model/text_encoder/bert.yaml` and `configs/model/speech_encoder/wav2vec2.yaml` with the correct `pretrained_path`
+
+## Verification
+
+```
+python train.py ++train.max_step_iterations=1000 ++train.log_every_steps=1 ++train.checkpoint_every_steps=100 ++train.validation_every_steps=100 +experiment=limit_longest_1-5_stage2
+
+deepspeed --num_gpus 1 train.py ++train.max_step_iterations=10 +experiment=limit_longest_1-5_stage2
+
+NCCL_P2P_DISABLE=1 deepspeed \
+  --include 'localhost:0,4' train.py \
+  '++train.max_step_iterations=100000' \
+  '++train.log_every_steps=1' \
+  '++train.validation_every_steps=500' \
+  '++train.checkpoint_every_steps=500' \
+  'deepspeed_config_yaml.train_micro_batch_size_per_gpu=128' \
+  '+experiment=limit_longest_1-5_stage2'
 ```
 
 ## Training

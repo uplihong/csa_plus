@@ -1,20 +1,55 @@
 import os
+import sys
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from csref.core.trainer import Trainer
-from csref.utils.distributed import seed_everything
+from csref.utils.distributed import seed_everything, is_rank_0
 from csref.utils.logging_utils import setup_logger
 
 logger = setup_logger(__name__)
 
-@hydra.main(config_path="configs", config_name="config_csa", version_base="1.3.2")
+
+def _normalize_local_rank_arg() -> None:
+    """Convert DeepSpeed/torch launcher local-rank CLI args into Hydra-compatible override."""
+    local_rank = None
+    cleaned_argv = [sys.argv[0]]
+    i = 1
+    while i < len(sys.argv):
+        arg = sys.argv[i]
+        if arg.startswith("--local_rank="):
+            local_rank = arg.split("=", 1)[1]
+        elif arg == "--local_rank":
+            if i + 1 < len(sys.argv):
+                local_rank = sys.argv[i + 1]
+                i += 1
+        elif arg.startswith("--local-rank="):
+            local_rank = arg.split("=", 1)[1]
+        elif arg == "--local-rank":
+            if i + 1 < len(sys.argv):
+                local_rank = sys.argv[i + 1]
+                i += 1
+        else:
+            cleaned_argv.append(arg)
+        i += 1
+
+    if local_rank is not None:
+        os.environ["LOCAL_RANK"] = str(local_rank)
+        if not any(arg.startswith("local_rank=") for arg in cleaned_argv[1:]):
+            cleaned_argv.append(f"local_rank={local_rank}")
+
+    sys.argv = cleaned_argv
+
+@hydra.main(config_path="configs", config_name="config_csa_plus", version_base="1.3.2")
 def main(cfg: DictConfig):
+    if "LOCAL_RANK" in os.environ:
+        cfg.local_rank = int(os.environ["LOCAL_RANK"])
+
     # Setup global seed
     if hasattr(cfg.train, 'seed'):
         seed_everything(cfg.train.seed)
     
     # Debug info
-    if os.environ.get("RANK", "0") == "0":
+    if is_rank_0():
         logger.info(f"Configuration:\n{OmegaConf.to_yaml(cfg)}")
     
     trainer = Trainer(cfg)
@@ -22,4 +57,5 @@ def main(cfg: DictConfig):
     trainer.fit()
 
 if __name__ == "__main__":
+    _normalize_local_rank_arg()
     main()

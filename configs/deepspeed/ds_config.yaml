@@ -1,8 +1,10 @@
 # deepspeed_config stage 0
-train_batch_size: 16
+train_batch_size: 256
+train_micro_batch_size_per_gpu: 256
+gradient_accumulation_steps: 1
 steps_per_print: 2000
 optimizer:
-  type: Adam
+  type: FusedAdam
   params:
     lr: 0.001
     betas: [0.8, 0.999]

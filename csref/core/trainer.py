@@ -8,9 +8,10 @@ from hydra.utils import instantiate
 from torch.utils.data import DataLoader
 
 from ..utils.logging_utils import setup_logger
-from ..utils.distributed import is_rank_0, save_zero_three_model, reduce_meters
+from ..utils.distributed import is_rank_0, save_zero_three_model, reduce_meters, get_rank
 from ..utils.metric import AverageMeter
 from ..data.dataloader import InfiniteIterator
+from ..data.transforms import RandomAudioSlice
 
 logger = setup_logger(__name__)
 
@@ -38,6 +39,14 @@ class Trainer:
         if is_rank_0() and hasattr(cfg.train, 'tensorboard_dir'):
             from tensorboardX import SummaryWriter
             self.writer = SummaryWriter(log_dir=cfg.train.tensorboard_dir)
+            
+        # Determine Training Precision
+        self.dtype = torch.float32
+        ds_conf = OmegaConf.to_container(self.cfg.deepspeed_config_yaml, resolve=True) if hasattr(self.cfg, 'deepspeed_config_yaml') else {}
+        if ds_conf.get('fp16', {}).get('enabled', False):
+            self.dtype = torch.float16
+        elif ds_conf.get('bf16', {}).get('enabled', False):
+            self.dtype = torch.bfloat16
 
     def setup(self):
         """Initializes model, optimizer, dataloaders, and DeepSpeed."""
@@ -45,9 +54,30 @@ class Trainer:
         logger.info("Setting up datasets...")
         self.cfg.dataset.train_split = "train"
         train_set = instantiate(self.cfg.dataset)
+
+        if hasattr(self.cfg.train, "min_max_audio_second") and self.cfg.train.min_max_audio_second:
+            min_max = self.cfg.train.min_max_audio_second
+            if len(min_max) != 2:
+                raise ValueError("train.min_max_audio_second must be a 2-element list [min_sec, max_sec]")
+            min_sec, max_sec = min_max
+            if max_sec < min_sec:
+                raise ValueError("train.min_max_audio_second max must be >= min")
+            target_sr = self.cfg.dataset.target_sample_rate
+            min_len = int(min_sec * target_sr)
+            max_len = int(max_sec * target_sr)
+            if min_len <= 0 or max_len <= 0:
+                raise ValueError("train.min_max_audio_second must be > 0")
+            train_set.transform = RandomAudioSlice(min_len, max_len, sample_rate=target_sr)
+            if is_rank_0():
+                logger.info(f"Apply RandomAudioSlice: {min_sec}-{max_sec}s @ {target_sr}Hz")
         
         self.cfg.dataset.train_split = "val"
         val_set = instantiate(self.cfg.dataset)
+
+        if len(train_set) == 0:
+            raise RuntimeError(f"Train dataset is empty. Please check dataset.root_dir: {self.cfg.dataset.root_dir}")
+        if len(val_set) == 0:
+            raise RuntimeError(f"Validation dataset is empty. Please check dataset.root_dir: {self.cfg.dataset.root_dir}")
         
         # 2. Dataloaders - Built later during DeepSpeed init or manually
         # Note: DeepSpeed initialize can take training_data but we might want custom loader
@@ -169,7 +199,7 @@ class Trainer:
             sampling_rate=self.cfg.dataset.target_sample_rate
         )
         
-        batch_text = self.text_tokenizer.batch_encode_plus(
+        batch_text = self.text_tokenizer(
             text_list,
             padding=True,
             truncation=True,
@@ -178,7 +208,7 @@ class Trainer:
             return_attention_mask=True
         )
 
-        audio_input = batch_audio.input_values.to(device).half() # Half if fp16
+        audio_input = batch_audio.input_values.to(device, dtype=self.dtype)
         audio_mask = batch_audio.attention_mask.to(device)
         
         text_input = batch_text.input_ids.to(device)
@@ -216,7 +246,7 @@ class Trainer:
                     return_tensors="pt",
                     sampling_rate=self.cfg.dataset.target_sample_rate
                 )
-                batch_text = self.text_tokenizer.batch_encode_plus(
+                batch_text = self.text_tokenizer(
                     text_list,
                     padding=True,
                     truncation=True,
@@ -224,7 +254,7 @@ class Trainer:
                     return_attention_mask=True
                 )
                 
-                audio_input = batch_audio.input_values.to(device).half()
+                audio_input = batch_audio.input_values.to(device, dtype=self.dtype)
                 audio_mask = batch_audio.attention_mask.to(device)
                 text_input = batch_text.input_ids.to(device)
                 text_mask = batch_text.attention_mask.to(device)
@@ -256,8 +286,9 @@ class Trainer:
         
         ds_config = self.cfg.deepspeed_config_yaml
         zero_stage = ds_config.get('zero_optimization', {}).get('stage', 0)
+        global_rank = get_rank()
         
         if zero_stage == 3:
-            save_zero_three_model(self.model_engine, self.local_rank, save_dir, zero_stage=3)
+            save_zero_three_model(self.model_engine, global_rank, save_dir, zero_stage=3)
         else:
             self.model_engine.save_checkpoint(save_dir=save_dir, client_state={'step': step})

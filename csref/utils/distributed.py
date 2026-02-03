@@ -10,6 +10,7 @@ import torch.distributed as dist
 from deepspeed.accelerator import get_accelerator
 import deepspeed
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+from .metric import AverageMeter
 
 
 def seed_everything(seed: Optional[int]) -> None:
@@ -54,6 +55,10 @@ def is_rank_0() -> bool:
         # Fallback to checking env vars if dist not initialized yet
         local_rank = int(os.environ.get("LOCAL_RANK", -1))
         rank = int(os.environ.get("RANK", -1))
+
+        # Single-process fallback when launcher env vars are absent.
+        if rank == -1 and local_rank == -1:
+            return True
         
         # If standard rank var is present
         if rank == 0:
@@ -76,6 +81,34 @@ def get_rank() -> int:
         return dist.get_rank()
     return int(os.environ.get("RANK", 0))
 
+
+def reduce_meters(meters, rank, cfg):
+    """Sync and flush meters."""
+    assert isinstance(meters, dict), "collect AverageMeters into a dict"
+    if not dist.is_initialized() or dist.get_world_size() == 1:
+        for name in sorted(meters.keys()):
+            meter = meters[name]
+            if not isinstance(meter, AverageMeter):
+                raise TypeError("meter should be AverageMeter type")
+            meter.update_reduce_v2(meter.avg, meter.sum, meter.count)
+        return
+
+    backend = dist.get_backend()
+    if backend == "nccl" and torch.cuda.is_available() and rank is not None and rank >= 0:
+        device = torch.device("cuda", rank)
+    else:
+        device = torch.device("cpu")
+    for name in sorted(meters.keys()):
+        meter = meters[name]
+        if not isinstance(meter, AverageMeter):
+            raise TypeError("meter should be AverageMeter type")
+        stats = torch.tensor([meter.sum, meter.count], dtype=torch.float64, device=device)
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        if is_rank_0():
+            sum_reduce = stats[0].item()
+            count_reduce = stats[1].item()
+            avg_reduce = sum_reduce / max(count_reduce, 1e-12)
+            meter.update_reduce_v2(avg_reduce, sum_reduce, count_reduce)
 
 def _z3_params_to_fetch(param_list):
     return [

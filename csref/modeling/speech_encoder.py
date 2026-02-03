@@ -63,6 +63,7 @@ class Wav2vec2(nn.Module):
             fusion_times: int = 1,
             freeze_layers: Optional[int] = None,  # freeze the first few layers
             short_cut: bool = False,
+            gradient_checkpointing: bool = False,
     ):
         super(Wav2vec2, self).__init__()
 
@@ -73,18 +74,29 @@ class Wav2vec2(nn.Module):
         self.use_att_flat_mask = use_att_flat_mask
         self.fusion_times = fusion_times
 
-        self.model = Wav2Vec2Model.from_pretrained(pretrained_path, gradient_checkpointing=False)
+        self.model = Wav2Vec2Model.from_pretrained(pretrained_path, gradient_checkpointing=gradient_checkpointing)
 
         if freeze_model:
-            if freeze_layers is not None:
-                self.model.masked_spec_embed.required_grad = False
+            if isinstance(freeze_layers, bool):
+                freeze_layers = len(self.model.encoder.layers) if freeze_layers else None
+
+            if freeze_layers is None:
+                # Legacy behavior: only freeze the feature encoder.
+                self.model.freeze_feature_encoder()
+            else:
+                if not isinstance(freeze_layers, int):
+                    raise TypeError("freeze_layers must be int or null")
+                if freeze_layers < 0:
+                    raise ValueError("freeze_layers must be >= 0")
+
+                if hasattr(self.model, "masked_spec_embed"):
+                    self.model.masked_spec_embed.requires_grad = False
                 self.frozen(self.model.feature_extractor)
                 self.frozen(self.model.feature_projection)
                 self.frozen(self.model.encoder.pos_conv_embed)
                 self.frozen(self.model.encoder.layer_norm)
-                self.frozen(self.model.encoder.layers[:freeze_layers])
-            else:
-                self.model.freeze_feature_encoder()
+                for layer in self.model.encoder.layers[:freeze_layers]:
+                    self.frozen(layer)
 
         if not use_one_hidden_state_as_feat:
             self.fusion_modules = GELUConv(

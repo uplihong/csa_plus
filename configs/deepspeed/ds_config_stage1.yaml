@@ -1,9 +1,10 @@
 train_batch_size: 256
+train_micro_batch_size_per_gpu: 256
 gradient_accumulation_steps: 1
 steps_per_print: 20
 
 optimizer:
-  type: Adam
+  type: FusedAdam
   params:
     lr: 0.0001
     betas:
