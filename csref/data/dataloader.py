@@ -50,15 +50,26 @@ def build_train_librispeech_loader(cfg, dataset: torch.utils.data.Dataset, shuff
         seed=cfg.train.seed if hasattr(cfg.train, 'seed') else 0
     )
 
-    data_loader = DataLoader(
-        dataset,
+    num_workers = int(cfg.train.data.num_workers)
+    pin_memory = bool(cfg.train.data.pin_memory)
+    prefetch_factor = getattr(cfg.train.data, "prefetch_factor", None)
+    persistent_workers = bool(getattr(cfg.train.data, "persistent_workers", False))
+
+    loader_kwargs = dict(
+        dataset=dataset,
         batch_size=micro_batch_size,
         sampler=sampler,
-        num_workers=cfg.train.data.num_workers,
-        pin_memory=cfg.train.data.pin_memory,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
         drop_last=drop_last,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
     )
+    if num_workers > 0:
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = int(prefetch_factor)
+        loader_kwargs["persistent_workers"] = persistent_workers
+
+    data_loader = DataLoader(**loader_kwargs)
     return data_loader
 
 
@@ -94,15 +105,26 @@ def build_test_librispeech_loader(cfg, dataset: torch.utils.data.Dataset, shuffl
             shuffle=shuffle
         )
 
-    data_loader = DataLoader(
-        dataset,
+    num_workers = int(cfg.train.data.num_workers)
+    pin_memory = bool(cfg.train.data.pin_memory)
+    prefetch_factor = getattr(cfg.train.data, "prefetch_factor", None)
+    persistent_workers = bool(getattr(cfg.train.data, "persistent_workers", False))
+
+    loader_kwargs = dict(
+        dataset=dataset,
         batch_size=eval_micro_batch_size,
         sampler=sampler,
-        num_workers=cfg.train.data.num_workers,
-        pin_memory=cfg.train.data.pin_memory,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
         drop_last=drop_last,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
     )
+    if num_workers > 0:
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = int(prefetch_factor)
+        loader_kwargs["persistent_workers"] = persistent_workers
+
+    data_loader = DataLoader(**loader_kwargs)
     return data_loader
 
 

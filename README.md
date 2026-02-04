@@ -42,6 +42,17 @@ Update `configs/dataset/librispeech.yaml` with the correct `root_dir`:
 root_dir: "/path/to/LibriSpeech"
 ```
 
+## Optional: Preprocess Audio (16k FLAC cache)
+If CPU resampling becomes a bottleneck, you can pre-resample LibriSpeech to 16k FLAC and point `dataset.root_dir`
+to the new folder:
+
+```bash
+python scripts/preprocess_librispeech_16k.py \
+  --input-root /path/to/LibriSpeech \
+  --output-root /path/to/LibriSpeech_16k \
+  --workers 8
+```
+
 ## Weights
 
 This project uses the `bert-base-uncased` and `wav2vec2-base` pretrained weights.

@@ -46,7 +46,20 @@ def main(cfg: DictConfig):
 
     # Setup global seed
     if hasattr(cfg.train, 'seed'):
-        seed_everything(cfg.train.seed)
+        seed_everything(
+            cfg.train.seed,
+            deterministic=getattr(cfg.train, "deterministic", None),
+            cudnn_benchmark=getattr(cfg.train, "cudnn_benchmark", None),
+        )
+    elif hasattr(cfg.train, "deterministic") or hasattr(cfg.train, "cudnn_benchmark"):
+        deterministic = getattr(cfg.train, "deterministic", None)
+        cudnn_benchmark = getattr(cfg.train, "cudnn_benchmark", None)
+        if deterministic is not None:
+            torch.backends.cudnn.deterministic = bool(deterministic)
+        if cudnn_benchmark is not None:
+            torch.backends.cudnn.benchmark = bool(cudnn_benchmark)
+        if torch.backends.cudnn.deterministic and torch.backends.cudnn.benchmark:
+            torch.backends.cudnn.benchmark = False
     
     # Debug info
     if is_rank_0():

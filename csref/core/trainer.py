@@ -208,11 +208,11 @@ class Trainer:
             return_attention_mask=True
         )
 
-        audio_input = batch_audio.input_values.to(device, dtype=self.dtype)
-        audio_mask = batch_audio.attention_mask.to(device)
+        audio_input = batch_audio.input_values.to(device, dtype=self.dtype, non_blocking=True)
+        audio_mask = batch_audio.attention_mask.to(device, non_blocking=True)
         
-        text_input = batch_text.input_ids.to(device)
-        text_mask = batch_text.attention_mask.to(device)
+        text_input = batch_text.input_ids.to(device, non_blocking=True)
+        text_mask = batch_text.attention_mask.to(device, non_blocking=True)
         
         # Forward
         loss = self.model_engine(audio_input, audio_mask, text_input, text_mask)
@@ -254,10 +254,10 @@ class Trainer:
                     return_attention_mask=True
                 )
                 
-                audio_input = batch_audio.input_values.to(device, dtype=self.dtype)
-                audio_mask = batch_audio.attention_mask.to(device)
-                text_input = batch_text.input_ids.to(device)
-                text_mask = batch_text.attention_mask.to(device)
+                audio_input = batch_audio.input_values.to(device, dtype=self.dtype, non_blocking=True)
+                audio_mask = batch_audio.attention_mask.to(device, non_blocking=True)
+                text_input = batch_text.input_ids.to(device, non_blocking=True)
+                text_mask = batch_text.attention_mask.to(device, non_blocking=True)
                 
                 # Forward
                 loss = self.model_engine(audio_input, audio_mask, text_input, text_mask)

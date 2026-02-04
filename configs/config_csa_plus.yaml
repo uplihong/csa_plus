@@ -18,3 +18,10 @@ local_rank: 0
 train:
   seed: 123456
   epochs: 100
+  deterministic: true
+  cudnn_benchmark: false
+  data:
+    num_workers: 2
+    pin_memory: true
+    prefetch_factor: 2
+    persistent_workers: true

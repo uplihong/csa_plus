@@ -13,8 +13,12 @@ from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from .metric import AverageMeter
 
 
-def seed_everything(seed: Optional[int]) -> None:
-    """Sets the seed for generating random numbers to ensure reproducibility."""
+def seed_everything(
+    seed: Optional[int],
+    deterministic: Optional[bool] = None,
+    cudnn_benchmark: Optional[bool] = None,
+) -> None:
+    """Sets the seed and CUDNN behavior for reproducibility/performance tradeoffs."""
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
@@ -23,12 +27,25 @@ def seed_everything(seed: Optional[int]) -> None:
         if torch.cuda.device_count() > 1:
             torch.cuda.manual_seed_all(seed)
 
-        cudnn.benchmark = False
-        cudnn.deterministic = True
+    if deterministic is None:
+        deterministic = True if seed is not None else cudnn.deterministic
+    if cudnn_benchmark is None:
+        cudnn_benchmark = False if seed is not None else cudnn.benchmark
+
+    if deterministic and cudnn_benchmark:
         warnings.warn(
-            'You have chosen to seed training. '
-            'This will turn on the CUDNN deterministic setting, '
-            'which can slow down your training considerably! '
+            "cudnn_benchmark=True conflicts with deterministic=True. "
+            "Disabling cudnn_benchmark."
+        )
+        cudnn_benchmark = False
+
+    cudnn.benchmark = cudnn_benchmark
+    cudnn.deterministic = deterministic
+
+    if deterministic:
+        warnings.warn(
+            'You have chosen to enable CUDNN deterministic mode. '
+            'This can slow down your training considerably! '
             'You may see unexpected behavior when restarting '
             'from checkpoints.'
         )

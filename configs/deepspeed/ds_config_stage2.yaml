@@ -1,5 +1,4 @@
 # deepspeed_config stage 2
-train_batch_size: 256
 train_micro_batch_size_per_gpu: 256
 gradient_accumulation_steps: 1
 steps_per_print: 4
@@ -34,16 +33,20 @@ zero_optimization:
   contiguous_gradients: true
   reduce_scatter: true
   reduce_bucket_size: 5e8
+#  reduce_bucket_size: 2e8
+#  reduce_bucket_size: 1e8
 #  use_multi_rank_bucket_allreduce: true
   allgather_partitions: true
   allgather_bucket_size: 5e8
+#  allgather_bucket_size: 2e8
+#  allgather_bucket_size: 1e8
   overlap_comm: true
 #  load_from_fp32_weights: true
 
 #  offload_param:
 #    device: cpu
 
-  offload_optimizer:  # todo: why/is enable "offload_optimizer" caused hang?
+  offload_optimizer:
     device: cpu
 
     pin_memory: true  # optimized for efficient CPU-GPU transfer during offload  # 在 stage 2 中启用时发现训练速度快很多

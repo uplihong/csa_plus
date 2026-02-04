@@ -9,6 +9,10 @@ deepspeed_config_yaml:
 #  train_batch_size: 128
   gradient_accumulation_steps: 1
   train_micro_batch_size_per_gpu: 128
+  wall_clock_breakdown: true
+  flops_profiler:
+    enabled: false
+    profile_step: 5
 
   zero_optimization:
     offload_optimizer: null
@@ -20,6 +24,8 @@ deepspeed_config_yaml:
 
 train:
   seed: 123456
+  deterministic: true
+  cudnn_benchmark: false
 #  min_max_audio_second: [1.0, 6.0]
   min_max_audio_second: [1.0, 5.0]
   # 训练好的CSA模型，在此基础上进一步cut audio训练
@@ -39,6 +45,8 @@ train:
   data:
     num_workers: 2
     pin_memory: true
+    prefetch_factor: 2
+    persistent_workers: true
 
 
 
