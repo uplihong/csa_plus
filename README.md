@@ -17,6 +17,9 @@ CSRef_2.0/
 ```
 
 ## Installation
+> conda or docker
+
+### Conda
 
 1. Create a virtual environment (optional but recommended):
    ```bash
@@ -33,6 +36,23 @@ CSRef_2.0/
    ```
    conda install -y openmpi mpi4py
    ```
+
+### docker
+
+```
+docker build -t csa_plus:cuda12.8 .
+```
+
+```
+docker run --rm -it --gpus all --shm-size=8g \
+  -v $PWD:/code \
+  -v /data/huanglh/dataset/LibriSpeech/:/data/huanglh/dataset/LibriSpeech/ \
+  -v /data/huanglh/huggingface/git/bert-base-uncased/:/data/huanglh/huggingface/git/bert-base-uncased/ \
+  -v /data/huanglh/huggingface/git/wav2vec2-base/:/data/huanglh/huggingface/git/wav2vec2-base/ \
+  -v /data/huanglh/code/ContrastiveAT/output/wav2vec2base_extractedtextfeature_freezefeatureencoder_32batchsize_4gpu_amp/ckpt_epoch_8.pth:/data/huanglh/code/ContrastiveAT/output/wav2vec2base_extractedtextfeature_freezefeatureencoder_32batchsize_4gpu_amp/ckpt_epoch_8.pth \
+  -w /code \
+  csa_plus:cuda12.8 bash
+```
 
 ## Dataset
 
@@ -79,6 +99,8 @@ NCCL_P2P_DISABLE=1 deepspeed \
   '++train.checkpoint_every_steps=500' \
   'deepspeed_config_yaml.train_micro_batch_size_per_gpu=128' \
   '+experiment=limit_longest_1-5_stage2'
+
+NCCL_P2P_DISABLE=1 deepspeed   --include 'localhost:0,4' train.py   '++train.max_step_iterations=100'   '++train.log_every_steps=1'   '++train.validation_every_steps=10'   '++train.checkpoint_every_steps=10'   'deepspeed_config_yaml.train_micro_batch_size_per_gpu=4'   '+experiment=limit_longest_1-5_stage2'   '++train.evaluation.eval_batch_size=4'
 ```
 
 ## Training
@@ -101,7 +123,10 @@ deepspeed --num_gpus 2 train.py
 Create a `hostfile` listing your nodes and slot counts (see DeepSpeed docs).
 
 ```bash
-deepspeed --hostfile /path/to/hostfile train.py
+deepspeed --hostfile=/etc/deepspeed/hostfile \
+  train.py +experiment=limit_longest_1-5_stage2 \
+  dataset.root_dir=/mnt/fs/LibriSpeech/LibriSpeech \
+  train.pretrained_model_checkpoint=
 ```
 
 ### Configuration
