@@ -141,14 +141,17 @@ deepspeed --num_gpus 2 train.py
 Create a `hostfile` listing your nodes and slot counts (see DeepSpeed docs).
 
 ```bash
+
 deepspeed --hostfile=/etc/deepspeed/hostfile \
   train.py \
   '++train.max_step_iterations=100000' \
   '++train.log_every_steps=1' \
   '++train.validation_every_steps=500' \
   '++train.checkpoint_every_steps=500' \
-  '++train.pretrained_model_checkpoint=/code/data/weights/csa/
-ckpt_epoch_8.pth' \
+  '++train.pretrained_model_checkpoint=/code/data/weights/csa/ckpt_epoch_8.pth' \
+  '++dataset.root_dir=/code/data/LibriSpeech/LibriSpeech' \
+  '++speech_encoder.pretrained_path=/code/data/weights/wav2vec2-base' \
+  '++text_encoder.pretrained_path=/code/data/weights/bert-base-uncased' \
   'deepspeed_config_yaml.train_micro_batch_size_per_gpu=128' \
   '+experiment=limit_longest_1-5_stage2'
 ```

@@ -6,7 +6,11 @@ SHELL ["/bin/bash", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    TZ=Asia/Shanghai \
+    LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8 \
+    SHELL=/bin/bash
 
 WORKDIR /code
 
@@ -28,10 +32,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     openmpi-bin \
     libopenmpi-dev \
+    tzdata \
+    locales \
+    vim \
+    wget \
+    iputils-ping \
+    iproute2 \
+    net-tools \
+    dnsutils \
+    tmux \
+    htop \
+    unzip \
+    less \
+  && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
+  && echo $TZ > /etc/timezone \
+  && locale-gen en_US.UTF-8 \
   && rm -rf /var/lib/apt/lists/*
 
-# Enable sshd
+# Enable sshd (generate host keys so sshd can start)
 RUN mkdir -p /var/run/sshd \
+  && ssh-keygen -A \
   && sed -ri 's/^#?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config \
   && sed -ri 's/^#?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
 
@@ -39,5 +59,16 @@ RUN mkdir -p /var/run/sshd \
 COPY requirements_docker.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt --break-system-packages
 
-# Default entrypoint keeps container alive; the platform will override the command.
-CMD ["/bin/bash"]
+# Entrypoint keeps container alive and starts sshd for platform plugins
+RUN printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -e' \
+  'if [ ! -f /etc/ssh/ssh_host_rsa_key ]; then ssh-keygen -A; fi' \
+  '/usr/sbin/sshd' \
+  'exec "$@"' \
+  > /usr/local/bin/entrypoint.sh \
+  && chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+# Keep container alive for dev plugins; platform can override the command.
+CMD ["/bin/bash", "-lc", "sleep infinity"]
