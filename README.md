@@ -100,6 +100,24 @@ NCCL_P2P_DISABLE=1 deepspeed \
   'deepspeed_config_yaml.train_micro_batch_size_per_gpu=128' \
   '+experiment=limit_longest_1-5_stage2'
 
+NCCL_P2P_DISABLE=1 deepspeed \
+  --include 'localhost:0,4' train.py \
+  '++train.max_step_iterations=100000' \
+  '++train.log_every_steps=1' \
+  '++train.validation_every_steps=500' \
+  '++train.checkpoint_every_steps=500' \
+  'deepspeed_config_yaml.train_micro_batch_size_per_gpu=128' \
+  '+experiment=limit_longest_1-4_stage2'
+
+NCCL_P2P_DISABLE=1 deepspeed \
+  --include 'localhost:0,4' train.py \
+  '++train.max_step_iterations=100000' \
+  '++train.log_every_steps=1' \
+  '++train.validation_every_steps=500' \
+  '++train.checkpoint_every_steps=500' \
+  'deepspeed_config_yaml.train_micro_batch_size_per_gpu=128' \
+  '+experiment=limit_longest_1-6_stage2'
+
 NCCL_P2P_DISABLE=1 deepspeed   --include 'localhost:0,4' train.py   '++train.max_step_iterations=100'   '++train.log_every_steps=1'   '++train.validation_every_steps=10'   '++train.checkpoint_every_steps=10'   'deepspeed_config_yaml.train_micro_batch_size_per_gpu=4'   '+experiment=limit_longest_1-5_stage2'   '++train.evaluation.eval_batch_size=4'
 ```
 
@@ -124,9 +142,15 @@ Create a `hostfile` listing your nodes and slot counts (see DeepSpeed docs).
 
 ```bash
 deepspeed --hostfile=/etc/deepspeed/hostfile \
-  train.py +experiment=limit_longest_1-5_stage2 \
-  dataset.root_dir=/mnt/fs/LibriSpeech/LibriSpeech \
-  train.pretrained_model_checkpoint=
+  train.py \
+  '++train.max_step_iterations=100000' \
+  '++train.log_every_steps=1' \
+  '++train.validation_every_steps=500' \
+  '++train.checkpoint_every_steps=500' \
+  '++train.pretrained_model_checkpoint=/code/data/weights/csa/
+ckpt_epoch_8.pth' \
+  'deepspeed_config_yaml.train_micro_batch_size_per_gpu=128' \
+  '+experiment=limit_longest_1-5_stage2'
 ```
 
 ### Configuration

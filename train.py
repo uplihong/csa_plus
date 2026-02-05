@@ -1,6 +1,7 @@
 import os
 import sys
 import hydra
+import torch
 from omegaconf import DictConfig, OmegaConf
 from csref.core.trainer import Trainer
 from csref.utils.distributed import seed_everything, is_rank_0
