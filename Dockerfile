@@ -7,10 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    TZ=Asia/Shanghai \
-    LANG=en_US.UTF-8 \
-    LC_ALL=en_US.UTF-8 \
-    SHELL=/bin/bash
+    PATH="${PATH}:/usr/sbin:/sbin"
 
 WORKDIR /code
 
@@ -21,6 +18,7 @@ WORKDIR /code
 # - mpi: required by mpi4py
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-server \
+    openssh-client \
     git \
     curl \
     ca-certificates \
@@ -44,31 +42,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     htop \
     unzip \
     less \
-  && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
-  && echo $TZ > /etc/timezone \
-  && locale-gen en_US.UTF-8 \
   && rm -rf /var/lib/apt/lists/*
 
-# Enable sshd (generate host keys so sshd can start)
+# Enable sshd
 RUN mkdir -p /var/run/sshd \
-  && ssh-keygen -A \
   && sed -ri 's/^#?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config \
-  && sed -ri 's/^#?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
+  && sed -ri 's/^#?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config \
+  && ssh-keygen -A
 
 # Install Python deps
 COPY requirements_docker.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt --break-system-packages
 
-# Entrypoint keeps container alive and starts sshd for platform plugins
-RUN printf '%s\n' \
-  '#!/usr/bin/env bash' \
-  'set -e' \
-  'if [ ! -f /etc/ssh/ssh_host_rsa_key ]; then ssh-keygen -A; fi' \
-  '/usr/sbin/sshd' \
-  'exec "$@"' \
-  > /usr/local/bin/entrypoint.sh \
-  && chmod +x /usr/local/bin/entrypoint.sh
+# Common ports used by the platform plugins.
+EXPOSE 22 8888
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-# Keep container alive for dev plugins; platform can override the command.
-CMD ["/bin/bash", "-lc", "sleep infinity"]
+# Default command keeps container alive (some platforms run plugin checks against a running container).
+CMD ["sleep", "infinity"]
