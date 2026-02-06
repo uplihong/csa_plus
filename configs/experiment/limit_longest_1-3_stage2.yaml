@@ -67,4 +67,4 @@ hydra:
 #   '++speech_encoder.pretrained_path=/code/data/weights/wav2vec2-base' \
 #   '++text_encoder.pretrained_path=/code/data/weights/bert-base-uncased' \
 #   'deepspeed_config_yaml.train_micro_batch_size_per_gpu=128' \
-#   '+experiment=limit_longest_1-5_stage2'
+#   '+experiment=limit_longest_1-3_stage2'
