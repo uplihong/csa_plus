@@ -1,61 +1,6 @@
-ARG BASE_IMAGE=pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel
+ARG BASE_IMAGE=harbor.aicloud.szu.edu.cn:5000/training/pytorch:2.8.0-cuda12.6-cudnn9-py311-ubuntu22.04
 FROM ${BASE_IMAGE}
-
-SHELL ["/bin/bash", "-c"]
-
-ENV DEBIAN_FRONTEND=noninteractive \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PATH="${PATH}:/usr/sbin:/sbin"
-
-WORKDIR /code
-
-# System deps:
-# - openssh-server: required by the platform for multi-node DeepSpeed
-# - build tools: required to compile DeepSpeed ops
-# - audio deps: required by librosa/soundfile
-# - mpi: required by mpi4py
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    openssh-server \
-    openssh-client \
-    git \
-    curl \
-    ca-certificates \
-    build-essential \
-    cmake \
-    ninja-build \
-    libaio-dev \
-    libsndfile1 \
-    ffmpeg \
-    openmpi-bin \
-    libopenmpi-dev \
-    tzdata \
-    locales \
-    vim \
-    wget \
-    iputils-ping \
-    iproute2 \
-    net-tools \
-    dnsutils \
-    tmux \
-    htop \
-    unzip \
-    less \
-  && rm -rf /var/lib/apt/lists/*
-
-# Enable sshd
-RUN mkdir -p /var/run/sshd \
-  && sed -ri 's/^#?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config \
-  && sed -ri 's/^#?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config \
-  && ssh-keygen -A
 
 # Install Python deps
 COPY requirements_docker.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt --break-system-packages
-
-# Common ports used by the platform plugins.
-EXPOSE 22 8888
-
-# Default command keeps container alive (some platforms run plugin checks against a running container).
-CMD ["sleep", "infinity"]
+RUN pip install --no-cache-dir -r /tmp/requirements.txt

@@ -89,8 +89,8 @@ class Wav2vec2(nn.Module):
                 if freeze_layers < 0:
                     raise ValueError("freeze_layers must be >= 0")
 
-                if hasattr(self.model, "masked_spec_embed"):
-                    self.model.masked_spec_embed.requires_grad = False
+                # if hasattr(self.model, "masked_spec_embed"):
+                #     self.model.masked_spec_embed.requires_grad = False
                 self.frozen(self.model.feature_extractor)
                 self.frozen(self.model.feature_projection)
                 self.frozen(self.model.encoder.pos_conv_embed)
