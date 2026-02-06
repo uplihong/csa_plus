@@ -1,5 +1,5 @@
-# deepspeed_config stage 1 (FP16)
-train_micro_batch_size_per_gpu: 256
+# deepspeed_config stage 1 (BF16, tuned for RTX 4090 multi-GPU)
+train_micro_batch_size_per_gpu: 128
 gradient_accumulation_steps: 1
 steps_per_print: 20
 
@@ -23,15 +23,11 @@ gradient_clipping: 1.0
 prescale_gradients: false
 wall_clock_breakdown: false
 
-fp16:
+bf16:
   enabled: true
-  auto_cast: false
-  loss_scale: 0
-  initial_scale_power: 16
-  loss_scale_window: 1000
-  hysteresis: 2
-  consecutive_hysteresis: false
-  min_loss_scale: 1
+
+fp16:
+  enabled: false
 
 zero_optimization:
   stage: 1
