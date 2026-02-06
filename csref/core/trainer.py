@@ -1,5 +1,6 @@
 import os
 import time
+from collections import deque
 import torch
 import deepspeed
 from typing import Optional, Any, Dict
@@ -29,6 +30,15 @@ class Trainer:
         # State
         self.global_step = 0
         self.start_epoch = 0
+        self.timing_window = int(getattr(cfg.train, "timing_window", 100))
+        self.step_timing_history = {
+            "data_wait_ms": deque(maxlen=self.timing_window),
+            "preprocess_ms": deque(maxlen=self.timing_window),
+            "fwd_ms": deque(maxlen=self.timing_window),
+            "bwd_ms": deque(maxlen=self.timing_window),
+            "step_ms": deque(maxlen=self.timing_window),
+            "iter_ms": deque(maxlen=self.timing_window),
+        }
         
         # Tools
         self.audio_preprocessor = instantiate(cfg.audio_preprocessor)
@@ -155,22 +165,37 @@ class Trainer:
         
         # Support infinite iterator or epoch-based
         max_steps = self.cfg.train.get('max_step_iterations', 100000)
-        iterator = InfiniteIterator(self.train_dataloader)
+        iterator = iter(InfiniteIterator(self.train_dataloader))
         
         logger.info("Starting training...")
-        
-        for i, (audio_list, text_list) in enumerate(iterator):
+
+        i = 0
+        while True:
             self.global_step = i
             
             if i > max_steps:
                 logger.info("Reached max steps. Stopping.")
                 break
-                
-            loss = self.train_step(audio_list, text_list)
+
+            data_wait_t0 = time.perf_counter()
+            audio_list, text_list = next(iterator)
+            data_wait_ms = (time.perf_counter() - data_wait_t0) * 1000.0
+
+            loss, step_timing = self.train_step(audio_list, text_list, return_timing=True)
+            step_timing["data_wait_ms"] = data_wait_ms
+            step_timing["iter_ms"] = (
+                step_timing["data_wait_ms"]
+                + step_timing["preprocess_ms"]
+                + step_timing["fwd_ms"]
+                + step_timing["bwd_ms"]
+                + step_timing["step_ms"]
+            )
+            self._record_step_timing(step_timing)
             
             # Logging
             if i % self.cfg.train.log_every_steps == 0 and is_rank_0():
                  logger.info(f"Step {i}: Loss {loss:.4f}")
+                 logger.info(f"Timing(window={self.timing_window}): {self._timing_summary()}")
                  if self.writer:
                      self.writer.add_scalar("Train/Loss", loss, i)
 
@@ -182,12 +207,42 @@ class Trainer:
             if i % self.cfg.train.validation_every_steps == 0 and i > 0:
                 self.validate(i)
 
-    def train_step(self, audio_list, text_list):
+            i += 1
+
+    def _record_step_timing(self, timings: Dict[str, float]):
+        for key, value in timings.items():
+            if key in self.step_timing_history:
+                self.step_timing_history[key].append(float(value))
+
+    @staticmethod
+    def _percentile(values, q):
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        if len(ordered) == 1:
+            return float(ordered[0])
+        pos = (len(ordered) - 1) * (q / 100.0)
+        left = int(pos)
+        right = min(left + 1, len(ordered) - 1)
+        frac = pos - left
+        return float(ordered[left] * (1 - frac) + ordered[right] * frac)
+
+    def _timing_summary(self) -> str:
+        metrics = []
+        for key in ["data_wait_ms", "preprocess_ms", "fwd_ms", "bwd_ms", "step_ms", "iter_ms"]:
+            values = list(self.step_timing_history[key])
+            p50 = self._percentile(values, 50)
+            p90 = self._percentile(values, 90)
+            metrics.append(f"{key}:p50={p50:.2f} p90={p90:.2f}")
+        return " | ".join(metrics)
+
+    def train_step(self, audio_list, text_list, return_timing: bool = False):
         # Data Processing
         # Apply processor/tokenizer
         # Note: audio_preprocessor is Wav2Vec2Processor or FeatureExtractor
         device = self.model_engine.device
-        
+
+        preprocess_t0 = time.perf_counter()
         batch_audio = self.audio_preprocessor(
             raw_speech=audio_list, 
             padding=True, 
@@ -213,15 +268,31 @@ class Trainer:
         
         text_input = batch_text.input_ids.to(device, non_blocking=True)
         text_mask = batch_text.attention_mask.to(device, non_blocking=True)
-        
+        preprocess_ms = (time.perf_counter() - preprocess_t0) * 1000.0
+
         # Forward
+        fwd_t0 = time.perf_counter()
         loss = self.model_engine(audio_input, audio_mask, text_input, text_mask)
-        
+        fwd_ms = (time.perf_counter() - fwd_t0) * 1000.0
+
         # Backward & Step
+        bwd_t0 = time.perf_counter()
         self.model_engine.backward(loss)
+        bwd_ms = (time.perf_counter() - bwd_t0) * 1000.0
+
+        step_t0 = time.perf_counter()
         self.model_engine.step()
-        
-        return loss.item()
+        step_ms = (time.perf_counter() - step_t0) * 1000.0
+
+        loss_value = loss.item()
+        if return_timing:
+            return loss_value, {
+                "preprocess_ms": preprocess_ms,
+                "fwd_ms": fwd_ms,
+                "bwd_ms": bwd_ms,
+                "step_ms": step_ms,
+            }
+        return loss_value
 
     def validate(self, step):
         logger.info("Starting validation...")

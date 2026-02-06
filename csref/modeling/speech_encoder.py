@@ -118,18 +118,21 @@ class Wav2vec2(nn.Module):
                 param.requires_grad = False
 
     def forward(self, audio: torch.Tensor, mask: torch.Tensor) -> Dict[str, torch.Tensor]:
-
+        need_hidden_states = (not self.use_one_hidden_state_as_feat) or (self.hidden_state_index != -1)
         output = self.model(
             input_values=audio,
             attention_mask=mask,
-            output_attentions=True,
-            output_hidden_states=True,
+            output_attentions=False,
+            output_hidden_states=need_hidden_states,
             return_dict=True
         )
 
         feat = None
         if self.use_one_hidden_state_as_feat:
-            hidden_state = output.hidden_states[self.hidden_state_index]  # [b, len, c]
+            if self.hidden_state_index == -1:
+                hidden_state = output.last_hidden_state
+            else:
+                hidden_state = output.hidden_states[self.hidden_state_index]  # [b, len, c]
             feat = hidden_state
         else:
             feat = torch.stack(output.hidden_states[self.hidden_state_index:], 1)  # [b, n_hidden, len, c]
@@ -140,7 +143,7 @@ class Wav2vec2(nn.Module):
         if self.use_att_flat_mask:
             # Note: access private method _get_feature_vector_attention_mask. 
             # In transformers > 4.26, this logic might change. Keeping it for now but worth monitoring.
-            last_hidden_len = output.hidden_states[-1].shape[1]
+            last_hidden_len = output.last_hidden_state.shape[1]
             first_attention_0 = self.model._get_feature_vector_attention_mask(last_hidden_len, mask)  # [b, len]
             mask_flip_bool = make_mask(first_attention_0.unsqueeze(2))  # [b, 1, 1, len]
             

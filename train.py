@@ -5,7 +5,7 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 from csref.core.trainer import Trainer
 from csref.utils.distributed import seed_everything, is_rank_0
-from csref.utils.logging_utils import setup_logger
+from csref.utils.logging_utils import setup_logger, configure_project_loggers
 
 logger = setup_logger(__name__)
 
@@ -44,6 +44,13 @@ def _normalize_local_rank_arg() -> None:
 def main(cfg: DictConfig):
     if "LOCAL_RANK" in os.environ:
         cfg.local_rank = int(os.environ["LOCAL_RANK"])
+    elif not hasattr(cfg, "local_rank"):
+        cfg.local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+
+    process_rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", cfg.local_rank)))
+    log_path = configure_project_loggers(cfg.experiment_output_dir, rank=process_rank)
+    if is_rank_0():
+        logger.info(f"Logging to file: {log_path}")
 
     # Setup global seed
     if hasattr(cfg.train, 'seed'):

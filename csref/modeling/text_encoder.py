@@ -33,16 +33,19 @@ class Bert(nn.Module):
                 param.requires_grad = False
 
     def forward(self, text_ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-
+        need_hidden_states = self.hidden_state_index != -1
         output = self.model(
             input_ids=text_ids,
             attention_mask=mask,
-            output_attentions=True,
-            output_hidden_states=True,
+            output_attentions=False,
+            output_hidden_states=need_hidden_states,
             return_dict=True
         )
 
-        hidden_state = output.hidden_states[self.hidden_state_index]
+        if self.hidden_state_index == -1:
+            hidden_state = output.last_hidden_state
+        else:
+            hidden_state = output.hidden_states[self.hidden_state_index]
         feat = hidden_state[:, 0, :]  # corresponding to [CLS] token
 
         return feat
