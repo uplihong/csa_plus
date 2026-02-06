@@ -1,0 +1,70 @@
+# @package _global_
+experiment_name: limit_longest_random_cut_1-3_stage2_batch128_no_offload
+experiment_output_dir: outputs/${experiment_name}/${now:%Y-%m-%d}/${now:%H-%M}
+
+
+deepspeed_config_yaml:
+  gradient_accumulation_steps: 1
+  train_micro_batch_size_per_gpu: 128
+  wall_clock_breakdown: true
+  flops_profiler:
+    enabled: false
+    profile_step: 5
+
+  zero_optimization:
+    offload_optimizer: null
+
+  tensorboard:
+    output_path: ${experiment_output_dir}
+    job_name: ${experiment_name}
+
+
+train:
+  seed: 123456
+  deterministic: true
+  cudnn_benchmark: false
+  min_max_audio_second: [1.0, 3.0]
+  # 训练好的CSA模型，在此基础上进一步cut audio训练
+  pretrained_model_checkpoint: /data/huanglh/code/ContrastiveAT/output/wav2vec2base_extractedtextfeature_freezefeatureencoder_32batchsize_4gpu_amp/ckpt_epoch_8.pth
+  tensorboard_dir: ${experiment_output_dir}
+  max_step_iterations: ${deepspeed_config_yaml.scheduler.params.total_num_steps}
+
+  checkpoint_every_steps: 1000
+  validation_every_steps: 5000
+  log_every_steps: 4
+
+  evaluation:
+    eval_batch_size: 128
+    sequential: false
+
+  data:
+    num_workers: 2
+    pin_memory: true
+    prefetch_factor: 2
+    persistent_workers: true
+
+
+
+hydra:
+  run:
+    dir: ${experiment_output_dir}
+  verbose: false
+
+# 26.2.6 
+# aicloud 
+# csa_plus:cuda12.6
+# csa_plus_librispeech_test3_4090
+# /share/home/tm891982051140000/a958668150/outputs/csa_plus_test3
+# 4090 GPUs (2 cards per node, 2 nodes)
+# deepspeed --hostfile=/etc/deepspeed/hostfile \
+#   train.py \
+#   '++train.max_step_iterations=100000' \
+#   '++train.log_every_steps=1' \
+#   '++train.validation_every_steps=500' \
+#   '++train.checkpoint_every_steps=500' \
+#   '++train.pretrained_model_checkpoint=/code/data/weights/csa/ckpt_epoch_8.pth' \
+#   '++dataset.root_dir=/code/data/LibriSpeech/LibriSpeech' \
+#   '++speech_encoder.pretrained_path=/code/data/weights/wav2vec2-base' \
+#   '++text_encoder.pretrained_path=/code/data/weights/bert-base-uncased' \
+#   'deepspeed_config_yaml.train_micro_batch_size_per_gpu=128' \
+#   '+experiment=limit_longest_1-5_stage2'
