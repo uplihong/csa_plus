@@ -2,7 +2,7 @@
 defaults:
   - override /deepspeed@deepspeed_config_yaml: ds_config_stage1_bf16
 
-experiment_name: limit_longest_random_cut_1-3_stage1_batch128_no_offload
+experiment_name: limit_longest_random_cut_1-3_stage1_bf16_batch128_no_offload
 experiment_output_dir: outputs/${experiment_name}/${now:%Y-%m-%d}/${now:%H-%M}
 
 

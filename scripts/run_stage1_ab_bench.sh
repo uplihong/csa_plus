@@ -141,8 +141,8 @@ require_pos_int "AB_TUNED_LOG_EVERY" "${AB_TUNED_LOG_EVERY}"
 require_pos_int "AB_TUNED_VALIDATION_EVERY" "${AB_TUNED_VALIDATION_EVERY}"
 require_pos_int "AB_TUNED_CHECKPOINT_EVERY" "${AB_TUNED_CHECKPOINT_EVERY}"
 
-require_pos_int "AB_OLD_ZERO_STAGE" "${AB_OLD_ZERO_STAGE}"
-require_pos_int "AB_TUNED_ZERO_STAGE" "${AB_TUNED_ZERO_STAGE}"
+require_nonneg_int "AB_OLD_ZERO_STAGE" "${AB_OLD_ZERO_STAGE}"
+require_nonneg_int "AB_TUNED_ZERO_STAGE" "${AB_TUNED_ZERO_STAGE}"
 require_pos_int "AB_OLD_NUM_WORKERS" "${AB_OLD_NUM_WORKERS}"
 require_pos_int "AB_OLD_PREFETCH_FACTOR" "${AB_OLD_PREFETCH_FACTOR}"
 require_pos_int "AB_TUNED_NUM_WORKERS" "${AB_TUNED_NUM_WORKERS}"
@@ -301,7 +301,7 @@ if [[ "${MODE}" == "sweep" || "${MODE}" == "both" ]]; then
   split_csv_to_array "${SWEEP_MICRO_BATCHES}" SWEEP_MBS
 
   for z in "${SWEEP_ZS[@]}"; do
-    require_pos_int "SWEEP_ZERO_STAGE item" "${z}"
+    require_nonneg_int "SWEEP_ZERO_STAGE item" "${z}"
   done
   for mb in "${SWEEP_MBS[@]}"; do
     require_pos_int "SWEEP_MICRO_BATCH item" "${mb}"
