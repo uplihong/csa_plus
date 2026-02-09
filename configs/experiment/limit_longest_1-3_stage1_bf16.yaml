@@ -25,6 +25,8 @@ deepspeed_config_yaml:
 train:
   seed: 123456
   deterministic: false
+  enable_cuda_sync_timing: false
+  timing_rank_scope: rank0
   # Variable-length audio + random slice is slower with cudnn benchmark search.
   cudnn_benchmark: false
   min_max_audio_second: [1.0, 3.0]
@@ -48,6 +50,12 @@ train:
     persistent_workers: true
     use_length_bucket: false
     bucket_boundaries_second: [1.0, 1.5, 2.0, 2.5, 3.0]
+
+dataset:
+  # Set LIBRISPEECH_MANIFEST_PATH for offline 16k+trim manifest.
+  manifest_path: ${oc.env:LIBRISPEECH_MANIFEST_PATH,null}
+  offline_trimmed: true
+  use_trim: false
 
 
 hydra:

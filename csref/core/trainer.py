@@ -2,6 +2,7 @@ import os
 import time
 from collections import deque
 import torch
+import torch.distributed as dist
 import deepspeed
 from typing import Optional, Any, Dict
 from omegaconf import DictConfig, OmegaConf
@@ -31,6 +32,10 @@ class Trainer:
         self.global_step = 0
         self.start_epoch = 0
         self.timing_window = int(getattr(cfg.train, "timing_window", 100))
+        self.enable_cuda_sync_timing = bool(getattr(cfg.train, "enable_cuda_sync_timing", False))
+        self.timing_rank_scope = str(getattr(cfg.train, "timing_rank_scope", "rank0")).lower()
+        if self.timing_rank_scope not in {"rank0", "all"}:
+            raise ValueError("train.timing_rank_scope must be one of: rank0, all")
         self.step_timing_history = {
             "data_wait_ms": deque(maxlen=self.timing_window),
             "preprocess_ms": deque(maxlen=self.timing_window),
@@ -140,6 +145,11 @@ class Trainer:
         if is_rank_0():
             logger.info("DeepSpeed initialized.")
             logger.info(f"Train set: {len(train_set)}, Val set: {len(val_set)}")
+            logger.info(
+                "Timing options: enable_cuda_sync_timing=%s, timing_rank_scope=%s",
+                self.enable_cuda_sync_timing,
+                self.timing_rank_scope,
+            )
 
     def _load_pretrained_weights(self, model, checkpoint_path):
         logger.info(f"Loading pretrained weights from {checkpoint_path}")
@@ -193,11 +203,30 @@ class Trainer:
             self._record_step_timing(step_timing)
             
             # Logging
-            if i % self.cfg.train.log_every_steps == 0 and is_rank_0():
-                 logger.info(f"Step {i}: Loss {loss:.4f}")
-                 logger.info(f"Timing(window={self.timing_window}): {self._timing_summary()}")
-                 if self.writer:
-                     self.writer.add_scalar("Train/Loss", loss, i)
+            should_log = (i % self.cfg.train.log_every_steps == 0)
+            rank_snapshots = None
+            if should_log:
+                rank_snapshots = self._gather_rank_timing_snapshot(step=i, loss=loss, step_timing=step_timing)
+
+            if should_log and is_rank_0():
+                logger.info(f"Step {i}: Loss {loss:.4f}")
+                logger.info(f"Timing(window={self.timing_window}): {self._timing_summary()}")
+                if rank_snapshots is not None:
+                    for item in rank_snapshots:
+                        logger.info(
+                            "TimingRank step=%d rank=%d loss=%.4f data_wait=%.2f preprocess=%.2f fwd=%.2f bwd=%.2f step=%.2f iter=%.2f",
+                            i,
+                            item["rank"],
+                            item["loss"],
+                            item["data_wait_ms"],
+                            item["preprocess_ms"],
+                            item["fwd_ms"],
+                            item["bwd_ms"],
+                            item["step_ms"],
+                            item["iter_ms"],
+                        )
+                if self.writer:
+                    self.writer.add_scalar("Train/Loss", loss, i)
 
             # Checkpointing
             if i % self.cfg.train.checkpoint_every_steps == 0 and i > 0:
@@ -236,6 +265,33 @@ class Trainer:
             metrics.append(f"{key}:p50={p50:.2f} p90={p90:.2f}")
         return " | ".join(metrics)
 
+    def _synchronize_cuda_for_timing(self, device: torch.device):
+        if self.enable_cuda_sync_timing and torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+
+    def _gather_rank_timing_snapshot(self, step: int, loss: float, step_timing: Dict[str, float]):
+        if self.timing_rank_scope != "all":
+            return None
+        if not dist.is_available() or not dist.is_initialized():
+            return None
+
+        payload = {
+            "step": int(step),
+            "rank": int(dist.get_rank()),
+            "loss": float(loss),
+            "data_wait_ms": float(step_timing["data_wait_ms"]),
+            "preprocess_ms": float(step_timing["preprocess_ms"]),
+            "fwd_ms": float(step_timing["fwd_ms"]),
+            "bwd_ms": float(step_timing["bwd_ms"]),
+            "step_ms": float(step_timing["step_ms"]),
+            "iter_ms": float(step_timing["iter_ms"]),
+        }
+        gathered = [None for _ in range(dist.get_world_size())]
+        dist.all_gather_object(gathered, payload)
+        if not is_rank_0():
+            return None
+        return sorted(gathered, key=lambda item: item["rank"])
+
     def train_step(self, audio_list, text_list, return_timing: bool = False):
         # Data Processing
         # Apply processor/tokenizer
@@ -268,20 +324,27 @@ class Trainer:
         
         text_input = batch_text.input_ids.to(device, non_blocking=True)
         text_mask = batch_text.attention_mask.to(device, non_blocking=True)
+        self._synchronize_cuda_for_timing(device)
         preprocess_ms = (time.perf_counter() - preprocess_t0) * 1000.0
 
         # Forward
+        self._synchronize_cuda_for_timing(device)
         fwd_t0 = time.perf_counter()
         loss = self.model_engine(audio_input, audio_mask, text_input, text_mask)
+        self._synchronize_cuda_for_timing(device)
         fwd_ms = (time.perf_counter() - fwd_t0) * 1000.0
 
         # Backward & Step
+        self._synchronize_cuda_for_timing(device)
         bwd_t0 = time.perf_counter()
         self.model_engine.backward(loss)
+        self._synchronize_cuda_for_timing(device)
         bwd_ms = (time.perf_counter() - bwd_t0) * 1000.0
 
+        self._synchronize_cuda_for_timing(device)
         step_t0 = time.perf_counter()
         self.model_engine.step()
+        self._synchronize_cuda_for_timing(device)
         step_ms = (time.perf_counter() - step_t0) * 1000.0
 
         loss_value = loss.item()
