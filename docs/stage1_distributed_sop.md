@@ -33,6 +33,11 @@ SWEEP_NUM_WORKERS_LIST=4,6,8 \
 SWEEP_PREFETCH_LIST=2,4 \
 SWEEP_LOG_EVERY=40 \
 TAIL_TIMING_POINTS=10 \
+HEARTBEAT_EVERY_SEC=30 \
+RUN_TIMEOUT_SEC=2400 \
+FAILURE_DUMP_TAIL=true \
+FAIL_TAIL_LINES=80 \
+RESUME_RUNS=true \
 SWEEP_VALIDATION_EVERY=1000000 \
 SWEEP_CHECKPOINT_EVERY=1000000 \
 DATASET_ROOT=/code/data/LibriSpeech/LibriSpeech_16k_trim \
@@ -41,9 +46,16 @@ DATASET_USE_TRIM=false \
 DATASET_OFFLINE_TRIMMED=true \
 ENABLE_CUDA_SYNC_TIMING=false \
 TIMING_RANK_SCOPE=rank0 \
-OUTPUT_ROOT=outputs/bench_4090_sweep_stage1_v2 \
-./scripts/run_stage1_ab_bench.sh
+OUTPUT_ROOT=outputs/bench_4090_sweep_stage1_v3 \
+./scripts/run_stage1_ab_bench.sh 2>&1 | tee outputs/bench_4090_sweep_stage1_v2/driver.log
 ```
+
+Notes:
+
+- `HEARTBEAT_EVERY_SEC=30` prints latest observed step periodically to avoid "silent hanging" perception.
+- `RUN_TIMEOUT_SEC=2400` marks a run as failed if it exceeds 40 minutes (tune up/down by your platform quota).
+- `RESUME_RUNS=true` keeps `run_manifest.tsv` and skips already-successful groups when rerunning after interruption.
+- On failure, script now records `exit_code`, `duration_sec`, `last_step` in `run_manifest.tsv` and prints launcher/train tail automatically.
 
 Outputs:
 
