@@ -27,6 +27,10 @@ train:
   deterministic: false
   enable_cuda_sync_timing: false
   timing_rank_scope: rank0
+  enable_torch_compile: false
+  torch_compile_mode: max-autotune
+  torch_compile_dynamic: true
+  fixed_slice_seconds: null
   # Variable-length audio + random slice is slower with cudnn benchmark search.
   cudnn_benchmark: false
   min_max_audio_second: [1.0, 3.0]

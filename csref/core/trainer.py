@@ -36,6 +36,18 @@ class Trainer:
         self.timing_rank_scope = str(getattr(cfg.train, "timing_rank_scope", "rank0")).lower()
         if self.timing_rank_scope not in {"rank0", "all"}:
             raise ValueError("train.timing_rank_scope must be one of: rank0, all")
+        self.enable_torch_compile = bool(getattr(cfg.train, "enable_torch_compile", False))
+        self.torch_compile_mode = str(getattr(cfg.train, "torch_compile_mode", "max-autotune"))
+        self.torch_compile_dynamic = bool(getattr(cfg.train, "torch_compile_dynamic", True))
+        fixed_slice = getattr(cfg.train, "fixed_slice_seconds", None)
+        self.fixed_slice_seconds: Optional[float] = None
+        if fixed_slice is not None:
+            try:
+                self.fixed_slice_seconds = float(fixed_slice)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("train.fixed_slice_seconds must be float or null") from exc
+            if self.fixed_slice_seconds <= 0:
+                raise ValueError("train.fixed_slice_seconds must be > 0")
         self.step_timing_history = {
             "data_wait_ms": deque(maxlen=self.timing_window),
             "preprocess_ms": deque(maxlen=self.timing_window),
@@ -70,14 +82,19 @@ class Trainer:
         self.cfg.dataset.train_split = "train"
         train_set = instantiate(self.cfg.dataset)
 
-        if hasattr(self.cfg.train, "min_max_audio_second") and self.cfg.train.min_max_audio_second:
+        target_sr = self.cfg.dataset.target_sample_rate
+        if self.fixed_slice_seconds is not None:
+            fixed_len = int(self.fixed_slice_seconds * target_sr)
+            train_set.transform = RandomAudioSlice(fixed_len, fixed_len, sample_rate=target_sr)
+            if is_rank_0():
+                logger.info(f"Apply fixed RandomAudioSlice: {self.fixed_slice_seconds:.3f}s @ {target_sr}Hz")
+        elif hasattr(self.cfg.train, "min_max_audio_second") and self.cfg.train.min_max_audio_second:
             min_max = self.cfg.train.min_max_audio_second
             if len(min_max) != 2:
                 raise ValueError("train.min_max_audio_second must be a 2-element list [min_sec, max_sec]")
             min_sec, max_sec = min_max
             if max_sec < min_sec:
                 raise ValueError("train.min_max_audio_second max must be >= min")
-            target_sr = self.cfg.dataset.target_sample_rate
             min_len = int(min_sec * target_sr)
             max_len = int(max_sec * target_sr)
             if min_len <= 0 or max_len <= 0:
@@ -110,11 +127,12 @@ class Trainer:
         if hasattr(self.cfg.train, 'pretrained_model_checkpoint') and self.cfg.train.pretrained_model_checkpoint:
             self._load_pretrained_weights(model, self.cfg.train.pretrained_model_checkpoint)
 
-        params_require_grad = filter(lambda p: p.requires_grad, model.parameters())
-        
         # Contiguous check
         for param in model.parameters():
             param.data = param.data.contiguous()
+
+        model = self._maybe_compile_model(model)
+        params_require_grad = filter(lambda p: p.requires_grad, model.parameters())
 
         # 4. DeepSpeed Setup
         logger.info("Initializing DeepSpeed...")
@@ -150,6 +168,36 @@ class Trainer:
                 self.enable_cuda_sync_timing,
                 self.timing_rank_scope,
             )
+            logger.info(
+                "Compile options: enable_torch_compile=%s, mode=%s, dynamic=%s",
+                self.enable_torch_compile,
+                self.torch_compile_mode,
+                self.torch_compile_dynamic,
+            )
+            logger.info("Data slicing: fixed_slice_seconds=%s", self.fixed_slice_seconds)
+
+    def _maybe_compile_model(self, model):
+        if not self.enable_torch_compile:
+            return model
+        if not hasattr(torch, "compile"):
+            logger.warning("torch.compile not available in current torch version. Falling back to eager model.")
+            return model
+
+        try:
+            compiled_model = torch.compile(
+                model,
+                mode=self.torch_compile_mode,
+                dynamic=self.torch_compile_dynamic,
+            )
+            logger.info(
+                "Enabled torch.compile with mode=%s dynamic=%s",
+                self.torch_compile_mode,
+                self.torch_compile_dynamic,
+            )
+            return compiled_model
+        except Exception as exc:
+            logger.warning("torch.compile failed, falling back to eager model: %s", exc)
+            return model
 
     def _load_pretrained_weights(self, model, checkpoint_path):
         logger.info(f"Loading pretrained weights from {checkpoint_path}")

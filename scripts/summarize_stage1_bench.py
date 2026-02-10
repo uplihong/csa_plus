@@ -173,6 +173,12 @@ def main():
             "dataset_offline_trimmed": row.get("dataset_offline_trimmed", ""),
             "enable_cuda_sync_timing": row.get("enable_cuda_sync_timing", ""),
             "timing_rank_scope": row.get("timing_rank_scope", ""),
+            "precision_mode_req": row.get("precision_mode_req", ""),
+            "precision_mode_effective": row.get("precision_mode_effective", ""),
+            "attn_impl_effective": row.get("attn_impl_effective", ""),
+            "torch_compile_enabled": row.get("torch_compile_enabled", ""),
+            "gpu_name": row.get("gpu_name", ""),
+            "gpu_cc": row.get("gpu_cc", ""),
             "log_every_steps": row.get("log_every_steps", ""),
             "validation_every_steps": row.get("validation_every_steps", ""),
             "checkpoint_every_steps": row.get("checkpoint_every_steps", ""),
@@ -261,6 +267,11 @@ def main():
                 "prefetch_factor": unique_or_mixed(rows, "prefetch_factor"),
                 "enable_cuda_sync_timing": unique_or_mixed(rows, "enable_cuda_sync_timing"),
                 "timing_rank_scope": unique_or_mixed(rows, "timing_rank_scope"),
+                "precision_mode_effective": unique_or_mixed(rows, "precision_mode_effective"),
+                "attn_impl_effective": unique_or_mixed(rows, "attn_impl_effective"),
+                "torch_compile_enabled": unique_or_mixed(rows, "torch_compile_enabled"),
+                "gpu_name": unique_or_mixed(rows, "gpu_name"),
+                "gpu_cc": unique_or_mixed(rows, "gpu_cc"),
                 "tail_mean_iter_p50_ms_mean": mean_iter,
                 "tail_mean_iter_p50_ms_std": std_iter,
                 "tail_mean_iter_p50_ms_min": min(vals),
@@ -302,6 +313,11 @@ def main():
             "micro_batch": best_group["micro_batch"],
             "num_workers": best_group["num_workers"],
             "prefetch_factor": best_group["prefetch_factor"],
+            "precision_mode_effective": best_group["precision_mode_effective"],
+            "attn_impl_effective": best_group["attn_impl_effective"],
+            "torch_compile_enabled": best_group["torch_compile_enabled"],
+            "gpu_name": best_group["gpu_name"],
+            "gpu_cc": best_group["gpu_cc"],
             "tail_mean_iter_p50_ms_mean": best_group["tail_mean_iter_p50_ms_mean"],
             "tail_steps_per_sec_mean": best_group["tail_steps_per_sec_mean"],
             "tail_samples_per_sec_mean": best_group["tail_samples_per_sec_mean"],
@@ -333,6 +349,11 @@ def main():
             env_line("BEST_MICRO_BATCH", best_payload.get("micro_batch", "")),
             env_line("BEST_NUM_WORKERS", best_payload.get("num_workers", "")),
             env_line("BEST_PREFETCH_FACTOR", best_payload.get("prefetch_factor", "")),
+            env_line("BEST_PRECISION_MODE_EFFECTIVE", best_payload.get("precision_mode_effective", "")),
+            env_line("BEST_ATTN_IMPL_EFFECTIVE", best_payload.get("attn_impl_effective", "")),
+            env_line("BEST_TORCH_COMPILE_ENABLED", best_payload.get("torch_compile_enabled", "")),
+            env_line("BEST_GPU_NAME", best_payload.get("gpu_name", "")),
+            env_line("BEST_GPU_CC", best_payload.get("gpu_cc", "")),
             env_line("BEST_TAIL_MEAN_ITER_P50_MS", best_payload.get("tail_mean_iter_p50_ms_mean", "")),
             env_line("BEST_TAIL_STEPS_PER_SEC", best_payload.get("tail_steps_per_sec_mean", "")),
             env_line("BEST_TAIL_SAMPLES_PER_SEC", best_payload.get("tail_samples_per_sec_mean", "")),
@@ -346,11 +367,20 @@ def main():
             f"deepspeed_config_yaml.train_micro_batch_size_per_gpu={best_payload.get('micro_batch', '')}",
             f"++train.data.num_workers={best_payload.get('num_workers', '')}",
             f"++train.data.prefetch_factor={best_payload.get('prefetch_factor', '')}",
+            f"++model.speech_encoder.attn_implementation={best_payload.get('attn_impl_effective', '')}",
+            f"++model.text_encoder.attn_implementation={best_payload.get('attn_impl_effective', '')}",
         ]
+        precision_mode = best_payload.get("precision_mode_effective", "")
+        if precision_mode == "bf16":
+            override_lines.append("deepspeed_config_yaml.bf16.enabled=true")
+            override_lines.append("deepspeed_config_yaml.fp16.enabled=false")
+        elif precision_mode == "fp16":
+            override_lines.append("deepspeed_config_yaml.bf16.enabled=false")
+            override_lines.append("deepspeed_config_yaml.fp16.enabled=true")
         best_overrides.write_text("\n".join(override_lines) + "\n", encoding="utf-8")
 
     lines = []
-    lines.append("# Stage1 BF16 Benchmark Report")
+    lines.append("# Stage1 Benchmark Report")
     lines.append("")
     lines.append(f"- Generated at: `{summary_payload['generated_at']}`")
     lines.append(f"- Output root: `{output_root}`")
@@ -363,6 +393,11 @@ def main():
         lines.append(f"- Group: `{best_payload['group']}`")
         lines.append(f"- zero_stage: `{best_payload['zero_stage']}`")
         lines.append(f"- micro_batch: `{best_payload['micro_batch']}`")
+        lines.append(f"- precision_mode_effective: `{best_payload['precision_mode_effective']}`")
+        lines.append(f"- attn_impl_effective: `{best_payload['attn_impl_effective']}`")
+        lines.append(f"- torch_compile_enabled: `{best_payload['torch_compile_enabled']}`")
+        lines.append(f"- gpu_name: `{best_payload['gpu_name']}`")
+        lines.append(f"- gpu_cc: `{best_payload['gpu_cc']}`")
         lines.append(f"- tail_mean_iter_p50_ms: `{best_payload['tail_mean_iter_p50_ms_mean']:.4f}`")
         lines.append(f"- tail_steps_per_sec: `{best_payload['tail_steps_per_sec_mean']:.4f}`")
         if not math.isnan(best_payload.get("tail_samples_per_sec_mean", math.nan)):
@@ -375,13 +410,13 @@ def main():
     lines.append("## Group Summary")
     lines.append("")
     if ranked_rows:
-        lines.append("| rank | group | runs | zero_stage | micro_batch | num_workers | prefetch | tail_mean_iter_p50_ms_mean | tail_steps_per_sec_mean | tail_samples_per_sec_mean | speedup_vs_baseline |")
-        lines.append("|---:|---|---:|---|---|---|---|---:|---:|---:|---:|")
+        lines.append("| rank | group | runs | zero_stage | micro_batch | precision | attn_impl | compile | num_workers | prefetch | tail_mean_iter_p50_ms_mean | tail_steps_per_sec_mean | tail_samples_per_sec_mean | speedup_vs_baseline |")
+        lines.append("|---:|---|---:|---|---|---|---|---|---|---|---:|---:|---:|---:|")
         for idx, row in enumerate(ranked_rows, start=1):
             sample_speed = "nan" if math.isnan(row["tail_samples_per_sec_mean"]) else f"{row['tail_samples_per_sec_mean']:.4f}"
             speedup = "nan" if math.isnan(row["speedup_vs_baseline"]) else f"{row['speedup_vs_baseline']:.4f}"
             lines.append(
-                f"| {idx} | {row['group']} | {row['runs']} | {row['zero_stage']} | {row['micro_batch']} | {row['num_workers']} | {row['prefetch_factor']} | "
+                f"| {idx} | {row['group']} | {row['runs']} | {row['zero_stage']} | {row['micro_batch']} | {row['precision_mode_effective']} | {row['attn_impl_effective']} | {row['torch_compile_enabled']} | {row['num_workers']} | {row['prefetch_factor']} | "
                 f"{row['tail_mean_iter_p50_ms_mean']:.4f} | {row['tail_steps_per_sec_mean']:.4f} | {sample_speed} | {speedup} |"
             )
     else:

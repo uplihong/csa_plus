@@ -5,3 +5,4 @@ pretrained_path: "data/weights/bert-base-uncased"
 freeze_model: True
 hidden_state_index: -1
 gradient_checkpointing: False # set to True to save memory at the cost of compute
+attn_implementation: null # set to eager | sdpa | flash_attention_2; null uses transformers default

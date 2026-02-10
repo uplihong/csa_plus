@@ -3,3 +3,8 @@ outputs/
 
 *.pyc
 
+test_cmd.txt
+data/LibriSpeech
+data/weights/bert-base-uncased
+data/weights/wav2vec2-base
+data/weights/csa/ckpt_epoch_8.pth

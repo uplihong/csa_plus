@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+import warnings
+from typing import Optional
 from transformers import BertModel
 
 
@@ -10,12 +12,28 @@ class Bert(nn.Module):
             freeze_model: bool = True,
             hidden_state_index: int = -1,
             gradient_checkpointing: bool = False,
+            attn_implementation: Optional[str] = None,
     ):
         super(Bert, self).__init__()
 
         self.hidden_state_index = hidden_state_index
 
-        self.model = BertModel.from_pretrained(pretrained_path)
+        from_pretrained_kwargs = {}
+        if attn_implementation:
+            from_pretrained_kwargs["attn_implementation"] = attn_implementation
+
+        try:
+            self.model = BertModel.from_pretrained(pretrained_path, **from_pretrained_kwargs)
+        except TypeError:
+            if "attn_implementation" in from_pretrained_kwargs:
+                warnings.warn(
+                    "BertModel.from_pretrained does not accept attn_implementation; fallback to default attention.",
+                    RuntimeWarning,
+                )
+                from_pretrained_kwargs.pop("attn_implementation")
+                self.model = BertModel.from_pretrained(pretrained_path, **from_pretrained_kwargs)
+            else:
+                raise
 
         if freeze_model:
             self.frozen(self.model)

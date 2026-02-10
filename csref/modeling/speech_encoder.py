@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import warnings
 from typing import Optional, Dict
 
 from transformers import Wav2Vec2Model
@@ -64,6 +65,7 @@ class Wav2vec2(nn.Module):
             freeze_layers: Optional[int] = None,  # freeze the first few layers
             short_cut: bool = False,
             gradient_checkpointing: bool = False,
+            attn_implementation: Optional[str] = None,
     ):
         super(Wav2vec2, self).__init__()
 
@@ -74,7 +76,24 @@ class Wav2vec2(nn.Module):
         self.use_att_flat_mask = use_att_flat_mask
         self.fusion_times = fusion_times
 
-        self.model = Wav2Vec2Model.from_pretrained(pretrained_path, gradient_checkpointing=gradient_checkpointing)
+        from_pretrained_kwargs = {
+            "gradient_checkpointing": gradient_checkpointing,
+        }
+        if attn_implementation:
+            from_pretrained_kwargs["attn_implementation"] = attn_implementation
+
+        try:
+            self.model = Wav2Vec2Model.from_pretrained(pretrained_path, **from_pretrained_kwargs)
+        except TypeError:
+            if "attn_implementation" in from_pretrained_kwargs:
+                warnings.warn(
+                    "Wav2Vec2Model.from_pretrained does not accept attn_implementation; fallback to default attention.",
+                    RuntimeWarning,
+                )
+                from_pretrained_kwargs.pop("attn_implementation")
+                self.model = Wav2Vec2Model.from_pretrained(pretrained_path, **from_pretrained_kwargs)
+            else:
+                raise
 
         if freeze_model:
             if isinstance(freeze_layers, bool):

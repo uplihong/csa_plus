@@ -11,3 +11,4 @@ hidden_state_index: -1
 use_att_flat_mask: True
 freeze_layers: null  # set N to freeze the first N transformer layers; null freezes only feature encoder
 gradient_checkpointing: False # set to True to save memory at the cost of compute
+attn_implementation: null # set to eager | sdpa | flash_attention_2; null uses transformers default
