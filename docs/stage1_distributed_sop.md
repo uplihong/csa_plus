@@ -37,7 +37,7 @@ MODE=sweep \
 INCLUDE=localhost:0,1,2,3 \
 REPEATS=2 \
 STOP_ON_ERROR=0 \
-MAX_STEPS=1000 \
+MAX_STEPS=2000 \
 SWEEP_ZERO_STAGES=0,1 \
 SWEEP_MICRO_BATCHES=128,160,192 \
 SWEEP_NUM_WORKERS_LIST=4,6,8 \
@@ -63,8 +63,9 @@ ENABLE_TORCH_COMPILE=false \
 TORCH_COMPILE_MODE=max-autotune \
 TORCH_COMPILE_DYNAMIC=true \
 ENABLE_LENGTH_FIXED_SLICE=false \
-OUTPUT_ROOT=outputs/bench_4090_sweep_stage1_v4 \
-./scripts/run_stage1_ab_bench.sh 2>&1 | tee outputs/bench_4090_sweep_stage1_v4/driver.log
+OUTPUT_ROOT=outputs/bench_4090_sweep_stage1_v5 \
+DRIVER_LOG_PATH=outputs/bench_4090_sweep_stage1_v5/driver.log \
+./scripts/run_stage1_ab_bench.sh
 ```
 
 ### 2xv100
@@ -73,9 +74,9 @@ MODE=sweep \
 INCLUDE=localhost:0,4 \
 REPEATS=1 \
 STOP_ON_ERROR=0 \
-MAX_STEPS=300 \
+MAX_STEPS=2000 \
 SWEEP_ZERO_STAGES=0,1 \
-SWEEP_MICRO_BATCHES=128,160,192 \
+SWEEP_MICRO_BATCHES=128,160,192,224 \
 SWEEP_NUM_WORKERS_LIST=4,6,8 \
 SWEEP_PREFETCH_LIST=2,4 \
 SWEEP_LOG_EVERY=10 \
@@ -99,8 +100,9 @@ ENABLE_TORCH_COMPILE=false \
 TORCH_COMPILE_MODE=max-autotune \
 TORCH_COMPILE_DYNAMIC=true \
 ENABLE_LENGTH_FIXED_SLICE=false \
-OUTPUT_ROOT=outputs/bench_4090_sweep_stage1_v4 \
-./scripts/run_stage1_ab_bench.sh 2>&1 | tee outputs/bench_4090_sweep_stage1_v4/driver.log
+OUTPUT_ROOT=outputs/bench_4090_sweep_stage1_v5 \
+DRIVER_LOG_PATH=outputs/bench_4090_sweep_stage1_v5/driver.log \
+./scripts/run_stage1_ab_bench.sh
 ```
 
 Notes:
@@ -110,6 +112,7 @@ Notes:
 - `RESUME_RUNS=true` keeps `run_manifest.tsv` and skips already-successful groups when rerunning after interruption.
 - On failure, script now records `exit_code`, `duration_sec`, `last_step` in `run_manifest.tsv` and prints launcher/train tail automatically.
 - `ENABLE_LENGTH_FIXED_SLICE=false` by default. Enable it only for throughput-only A/B tests, e.g. `ENABLE_LENGTH_FIXED_SLICE=true FIXED_SLICE_SECONDS=2.0`.
+- Prefer `DRIVER_LOG_PATH=... ./scripts/run_stage1_ab_bench.sh` over external `| tee ...`. If you still use external `tee`, pre-create the directory first.
 
 Outputs:
 

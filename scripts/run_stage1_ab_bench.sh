@@ -21,6 +21,7 @@ set -euo pipefail
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/bench_stage1_ab_${TIMESTAMP}}"
+DRIVER_LOG_PATH="${DRIVER_LOG_PATH:-}"
 
 MODE="${MODE:-ab}"                # ab | sweep | both
 EXPERIMENT="${EXPERIMENT:-limit_longest_1-3_stage1_bf16}"
@@ -102,6 +103,13 @@ declare -A COMPLETED_RUNS
 PYTHON_CMD=(python)
 if [[ -n "${CONDA_ENV}" ]]; then
   PYTHON_CMD=(conda run -n "${CONDA_ENV}" python)
+fi
+
+# Optional internal driver log. Prefer this over external `| tee ...` to avoid
+# missing-directory issues before the script starts.
+if [[ -n "${DRIVER_LOG_PATH}" ]]; then
+  mkdir -p "$(dirname "${DRIVER_LOG_PATH}")"
+  exec > >(tee -a "${DRIVER_LOG_PATH}") 2>&1
 fi
 
 is_pos_int() {
@@ -415,6 +423,46 @@ EFFECTIVE_ATTN_IMPL="$(resolve_attn_impl "${ATTN_IMPL}" "${EFFECTIVE_PRECISION_M
 
 PORT_COUNTER=0
 
+is_port_available() {
+  local port="$1"
+  if [[ ! "${port}" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  if [[ "${port}" -lt 1 || "${port}" -gt 65535 ]]; then
+    return 1
+  fi
+  "${PYTHON_CMD[@]}" - "${port}" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    sock.bind(("0.0.0.0", port))
+except OSError:
+    raise SystemExit(1)
+finally:
+    sock.close()
+PY
+}
+
+reserve_master_port() {
+  local attempts=0
+  local max_attempts=200
+  while [[ "${attempts}" -lt "${max_attempts}" ]]; do
+    local candidate=$((MASTER_PORT_BASE + PORT_COUNTER))
+    PORT_COUNTER=$((PORT_COUNTER + 1))
+    if is_port_available "${candidate}"; then
+      echo "${candidate}"
+      return 0
+    fi
+    echo "[WARN] master_port ${candidate} is already in use, trying next..." >&2
+    attempts=$((attempts + 1))
+  done
+  echo "[ERROR] Failed to find an available master port after ${max_attempts} attempts starting at ${MASTER_PORT_BASE}" >&2
+  exit 1
+}
+
 init_manifest() {
   if [[ "${RESUME_RUNS}" == "true" && -f "${MANIFEST_PATH}" ]]; then
     local existing_header
@@ -490,6 +538,50 @@ start_heartbeat() {
   echo "$!"
 }
 
+ACTIVE_RUN_PID=""
+ACTIVE_RUN_PGID=""
+ACTIVE_HEARTBEAT_PID=""
+
+stop_active_heartbeat() {
+  if [[ -z "${ACTIVE_HEARTBEAT_PID}" ]]; then
+    return 0
+  fi
+  if kill -0 "${ACTIVE_HEARTBEAT_PID}" 2>/dev/null; then
+    kill "${ACTIVE_HEARTBEAT_PID}" 2>/dev/null || true
+    wait "${ACTIVE_HEARTBEAT_PID}" 2>/dev/null || true
+  fi
+  ACTIVE_HEARTBEAT_PID=""
+}
+
+terminate_active_run() {
+  local reason="${1:-cleanup}"
+  if [[ -z "${ACTIVE_RUN_PID}" ]]; then
+    return 0
+  fi
+
+  if ! kill -0 "${ACTIVE_RUN_PID}" 2>/dev/null; then
+    ACTIVE_RUN_PID=""
+    ACTIVE_RUN_PGID=""
+    return 0
+  fi
+
+  echo "[WARN] ${reason}: terminating active training process (pid=${ACTIVE_RUN_PID}, pgid=${ACTIVE_RUN_PGID:-N/A})" >&2
+  if [[ -n "${ACTIVE_RUN_PGID}" ]]; then
+    # Prefer process-group kill so all deepspeed ranks are terminated together.
+    kill -TERM -- "-${ACTIVE_RUN_PGID}" 2>/dev/null || true
+    sleep 2
+    kill -KILL -- "-${ACTIVE_RUN_PGID}" 2>/dev/null || true
+  else
+    # Fallback when setsid is unavailable and we only have the launcher PID.
+    kill -TERM "${ACTIVE_RUN_PID}" 2>/dev/null || true
+    sleep 2
+    kill -KILL "${ACTIVE_RUN_PID}" 2>/dev/null || true
+  fi
+
+  ACTIVE_RUN_PID=""
+  ACTIVE_RUN_PGID=""
+}
+
 run_case() {
   local mode_name="$1"
   local group="$2"
@@ -516,8 +608,8 @@ run_case() {
 
   mkdir -p "${run_dir}"
 
-  local port=$((MASTER_PORT_BASE + PORT_COUNTER))
-  PORT_COUNTER=$((PORT_COUNTER + 1))
+  local port=""
+  port="$(reserve_master_port)"
 
   local global_batch=""
   if [[ "${WORLD_SIZE}" -gt 0 ]]; then
@@ -623,14 +715,33 @@ run_case() {
 
   run_start_epoch="$(date +%s)"
 
+  local run_pid=""
+  local run_pgid=""
   if [[ "${RUN_TIMEOUT_SEC}" -gt 0 ]]; then
-    timeout --signal=TERM --kill-after=60 "${RUN_TIMEOUT_SEC}" "${exec_cmd[@]}" >> "${launcher_log}" 2>&1 &
+    if command -v setsid >/dev/null 2>&1; then
+      setsid timeout --signal=TERM --kill-after=60 "${RUN_TIMEOUT_SEC}" "${exec_cmd[@]}" >> "${launcher_log}" 2>&1 &
+      run_pid="$!"
+      run_pgid="${run_pid}"
+    else
+      timeout --signal=TERM --kill-after=60 "${RUN_TIMEOUT_SEC}" "${exec_cmd[@]}" >> "${launcher_log}" 2>&1 &
+      run_pid="$!"
+    fi
   else
-    "${exec_cmd[@]}" >> "${launcher_log}" 2>&1 &
+    if command -v setsid >/dev/null 2>&1; then
+      setsid "${exec_cmd[@]}" >> "${launcher_log}" 2>&1 &
+      run_pid="$!"
+      run_pgid="${run_pid}"
+    else
+      "${exec_cmd[@]}" >> "${launcher_log}" 2>&1 &
+      run_pid="$!"
+    fi
   fi
-  local run_pid="$!"
+  ACTIVE_RUN_PID="${run_pid}"
+  ACTIVE_RUN_PGID="${run_pgid}"
+
   local heartbeat_pid=""
   heartbeat_pid="$(start_heartbeat "${run_pid}" "${group}" "${repeat}" "${train_log}" "${HEARTBEAT_EVERY_SEC}")"
+  ACTIVE_HEARTBEAT_PID="${heartbeat_pid}"
 
   if wait "${run_pid}"; then
     exit_code=0
@@ -643,6 +754,9 @@ run_case() {
     kill "${heartbeat_pid}" 2>/dev/null || true
     wait "${heartbeat_pid}" 2>/dev/null || true
   fi
+  ACTIVE_HEARTBEAT_PID=""
+  ACTIVE_RUN_PID=""
+  ACTIVE_RUN_PGID=""
 
   run_end_epoch="$(date +%s)"
   duration_sec=$((run_end_epoch - run_start_epoch))
@@ -706,6 +820,8 @@ INTERRUPTED=0
 handle_interrupt() {
   INTERRUPTED=1
   echo "[WARN] Received interrupt signal. Writing partial benchmark summary..." >&2
+  stop_active_heartbeat
+  terminate_active_run "interrupt signal received"
   exit 130
 }
 
@@ -735,6 +851,8 @@ generate_summary() {
 
 finalize_on_exit() {
   local exit_code="$1"
+  stop_active_heartbeat
+  terminate_active_run "script exiting"
   if [[ "${SUMMARY_RAN}" -eq 0 ]]; then
     if ! generate_summary; then
       echo "[WARN] Failed to generate benchmark summary during exit." >&2
@@ -757,6 +875,7 @@ echo "[INFO] Timing flags: enable_cuda_sync_timing=${ENABLE_CUDA_SYNC_TIMING}, t
 echo "[INFO] Runtime profile: gpu_name=${DETECTED_GPU_NAME}, gpu_cc=${DETECTED_GPU_CC}, min_cc_major=${DETECTED_MIN_CC_MAJOR}, flash_attn2_available=${FLASH_ATTN2_AVAILABLE}"
 echo "[INFO] Precision/attention: requested_precision=${PRECISION_MODE}, effective_precision=${EFFECTIVE_PRECISION_MODE}, requested_attn_impl=${ATTN_IMPL}, effective_attn_impl=${EFFECTIVE_ATTN_IMPL}"
 echo "[INFO] Compile/fixed-slice: enable_torch_compile=${ENABLE_TORCH_COMPILE}, torch_compile_mode=${TORCH_COMPILE_MODE}, torch_compile_dynamic=${TORCH_COMPILE_DYNAMIC}, enable_length_fixed_slice=${ENABLE_LENGTH_FIXED_SLICE}, fixed_slice_seconds=${FIXED_SLICE_SECONDS:-<none>}"
+echo "[INFO] Driver log path: ${DRIVER_LOG_PATH:-<disabled>}"
 
 if [[ "${MODE}" == "ab" || "${MODE}" == "both" ]]; then
   echo "[INFO] Running AB mode..."
