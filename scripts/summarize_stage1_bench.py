@@ -41,6 +41,21 @@ def env_line(key, value):
     return f"{key}={value}"
 
 
+def parse_boolish(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def parse_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return math.nan
+
+
 def main():
     parser = argparse.ArgumentParser(description="Summarize stage1 benchmark logs.")
     parser.add_argument("--manifest", required=True, help="Path to run_manifest.tsv")
@@ -55,7 +70,10 @@ def main():
     baseline_group = args.baseline_group
     output_root.mkdir(parents=True, exist_ok=True)
 
-    timing_patterns = {k: re.compile(rf"{k}:p50=([0-9]+(?:\.[0-9]+)?)") for k in TIMING_KEYS}
+    timing_patterns = {
+        k: re.compile(rf"{k}:p50=([0-9]+(?:\.[0-9]+)?) p90=([0-9]+(?:\.[0-9]+)?)")
+        for k in TIMING_KEYS
+    }
     step_pattern = re.compile(r"Step\s+([0-9]+):")
 
     per_run_rows = []
@@ -113,7 +131,8 @@ def main():
                     if not m:
                         ok = False
                         break
-                    values[key] = float(m.group(1))
+                    values[f"{key}_p50"] = float(m.group(1))
+                    values[f"{key}_p90"] = float(m.group(2))
                 if ok:
                     values["step"] = last_step
                     points.append(values)
@@ -130,13 +149,17 @@ def main():
             )
             continue
 
-        iter_values = [p["iter_ms"] for p in points]
+        iter_values = [p["iter_ms_p50"] for p in points]
+        iter_p90_values = [p["iter_ms_p90"] for p in points]
         tail_n = min(tail_points, len(iter_values))
         tail_values = iter_values[-tail_n:]
+        tail_p90_values = iter_p90_values[-tail_n:]
 
         last_point = points[-1]
         tail_mean_iter = statistics.mean(tail_values)
+        tail_mean_iter_p90 = statistics.mean(tail_p90_values)
         tail_std_iter = statistics.stdev(tail_values) if len(tail_values) > 1 else 0.0
+        tail_std_iter_p90 = statistics.stdev(tail_p90_values) if len(tail_p90_values) > 1 else 0.0
         all_mean_iter = statistics.mean(iter_values)
         all_std_iter = statistics.stdev(iter_values) if len(iter_values) > 1 else 0.0
         steps_per_sec_tail = 1000.0 / tail_mean_iter
@@ -151,6 +174,22 @@ def main():
             samples_per_sec_tail = global_batch * 1000.0 / tail_mean_iter
         else:
             samples_per_sec_tail = math.nan
+
+        iter_ratio = parse_float(row.get("iter_p90_over_p50", ""))
+        data_ratio = parse_float(row.get("data_p90_over_p50", ""))
+        step_ratio = parse_float(row.get("step_p90_over_p50", ""))
+        if math.isnan(iter_ratio) and last_point["iter_ms_p50"] > 0:
+            iter_ratio = last_point["iter_ms_p90"] / last_point["iter_ms_p50"]
+        if math.isnan(data_ratio) and last_point["data_wait_ms_p50"] > 0:
+            data_ratio = last_point["data_wait_ms_p90"] / last_point["data_wait_ms_p50"]
+        if math.isnan(step_ratio) and last_point["step_ms_p50"] > 0:
+            step_ratio = last_point["step_ms_p90"] / last_point["step_ms_p50"]
+        unstable_flag = parse_boolish(row.get("unstable_run_flag", ""))
+        if not unstable_flag:
+            unstable_flag = (
+                (not math.isnan(iter_ratio) and iter_ratio > 2.0)
+                or (not math.isnan(step_ratio) and step_ratio > 3.0)
+            )
 
         per_run = {
             "mode": mode,
@@ -185,13 +224,26 @@ def main():
             "timing_points": len(points),
             "tail_points_used": tail_n,
             "last_step": last_point["step"],
-            "last_iter_p50_ms": last_point["iter_ms"],
-            "last_fwd_p50_ms": last_point["fwd_ms"],
-            "last_bwd_p50_ms": last_point["bwd_ms"],
+            "last_iter_p50_ms": last_point["iter_ms_p50"],
+            "last_iter_p90_ms": last_point["iter_ms_p90"],
+            "last_fwd_p50_ms": last_point["fwd_ms_p50"],
+            "last_fwd_p90_ms": last_point["fwd_ms_p90"],
+            "last_bwd_p50_ms": last_point["bwd_ms_p50"],
+            "last_bwd_p90_ms": last_point["bwd_ms_p90"],
+            "last_data_wait_p50_ms": last_point["data_wait_ms_p50"],
+            "last_data_wait_p90_ms": last_point["data_wait_ms_p90"],
+            "last_step_p50_ms": last_point["step_ms_p50"],
+            "last_step_p90_ms": last_point["step_ms_p90"],
             "tail_mean_iter_p50_ms": tail_mean_iter,
+            "tail_mean_iter_p90_ms": tail_mean_iter_p90,
             "tail_std_iter_p50_ms": tail_std_iter,
+            "tail_std_iter_p90_ms": tail_std_iter_p90,
             "all_mean_iter_p50_ms": all_mean_iter,
             "all_std_iter_p50_ms": all_std_iter,
+            "iter_p90_over_p50": iter_ratio,
+            "data_p90_over_p50": data_ratio,
+            "step_p90_over_p50": step_ratio,
+            "unstable_run_flag": unstable_flag,
             "tail_steps_per_sec": steps_per_sec_tail,
             "tail_samples_per_sec": samples_per_sec_tail,
         }
@@ -205,12 +257,18 @@ def main():
                     "repeat": repeat,
                     "index": idx,
                     "step": point["step"],
-                    "data_wait_ms_p50": point["data_wait_ms"],
-                    "preprocess_ms_p50": point["preprocess_ms"],
-                    "fwd_ms_p50": point["fwd_ms"],
-                    "bwd_ms_p50": point["bwd_ms"],
-                    "step_ms_p50": point["step_ms"],
-                    "iter_ms_p50": point["iter_ms"],
+                    "data_wait_ms_p50": point["data_wait_ms_p50"],
+                    "data_wait_ms_p90": point["data_wait_ms_p90"],
+                    "preprocess_ms_p50": point["preprocess_ms_p50"],
+                    "preprocess_ms_p90": point["preprocess_ms_p90"],
+                    "fwd_ms_p50": point["fwd_ms_p50"],
+                    "fwd_ms_p90": point["fwd_ms_p90"],
+                    "bwd_ms_p50": point["bwd_ms_p50"],
+                    "bwd_ms_p90": point["bwd_ms_p90"],
+                    "step_ms_p50": point["step_ms_p50"],
+                    "step_ms_p90": point["step_ms_p90"],
+                    "iter_ms_p50": point["iter_ms_p50"],
+                    "iter_ms_p90": point["iter_ms_p90"],
                     "train_log": str(train_log),
                 }
             )
@@ -251,10 +309,18 @@ def main():
     group_rows = []
     for group, rows in sorted(grouped.items()):
         vals = [r["tail_mean_iter_p50_ms"] for r in rows]
+        vals_p90 = [r["tail_mean_iter_p90_ms"] for r in rows]
         steps_vals = [r["tail_steps_per_sec"] for r in rows]
         samples_vals = [r["tail_samples_per_sec"] for r in rows if not math.isnan(r["tail_samples_per_sec"])]
+        iter_ratio_vals = [r["iter_p90_over_p50"] for r in rows if not math.isnan(r["iter_p90_over_p50"])]
+        unstable_runs = [r for r in rows if parse_boolish(r.get("unstable_run_flag", False))]
         mean_iter = statistics.mean(vals)
+        mean_iter_p90 = statistics.mean(vals_p90)
         std_iter = statistics.stdev(vals) if len(vals) > 1 else 0.0
+        std_iter_p90 = statistics.stdev(vals_p90) if len(vals_p90) > 1 else 0.0
+        unstable_ratio = len(unstable_runs) / len(rows) if rows else 0.0
+        stability_ratio = (mean_iter_p90 / mean_iter) if mean_iter > 0 else math.nan
+        stability_score = stability_ratio * (1.0 + unstable_ratio) if not math.isnan(stability_ratio) else math.nan
 
         group_rows.append(
             {
@@ -273,16 +339,45 @@ def main():
                 "gpu_name": unique_or_mixed(rows, "gpu_name"),
                 "gpu_cc": unique_or_mixed(rows, "gpu_cc"),
                 "tail_mean_iter_p50_ms_mean": mean_iter,
+                "tail_mean_iter_p90_ms_mean": mean_iter_p90,
                 "tail_mean_iter_p50_ms_std": std_iter,
+                "tail_mean_iter_p90_ms_std": std_iter_p90,
                 "tail_mean_iter_p50_ms_min": min(vals),
                 "tail_mean_iter_p50_ms_max": max(vals),
+                "tail_mean_iter_p90_ms_min": min(vals_p90),
+                "tail_mean_iter_p90_ms_max": max(vals_p90),
+                "iter_p90_over_p50_mean": statistics.mean(iter_ratio_vals) if iter_ratio_vals else math.nan,
+                "iter_p90_over_p50_std": statistics.stdev(iter_ratio_vals) if len(iter_ratio_vals) > 1 else 0.0,
                 "tail_steps_per_sec_mean": statistics.mean(steps_vals),
                 "tail_steps_per_sec_std": statistics.stdev(steps_vals) if len(steps_vals) > 1 else 0.0,
                 "tail_samples_per_sec_mean": statistics.mean(samples_vals) if samples_vals else math.nan,
                 "tail_samples_per_sec_std": statistics.stdev(samples_vals) if len(samples_vals) > 1 else 0.0,
+                "unstable_run_count": len(unstable_runs),
+                "unstable_run_ratio": unstable_ratio,
+                "stability_score": stability_score,
                 "speedup_vs_baseline": baseline_mean / mean_iter if not math.isnan(baseline_mean) else math.nan,
             }
         )
+
+    if group_rows:
+        by_iter = sorted(group_rows, key=lambda x: x["tail_mean_iter_p50_ms_mean"])
+        for idx, row in enumerate(by_iter, start=1):
+            row["rank_by_iter_p50"] = idx
+        by_stability = sorted(
+            group_rows,
+            key=lambda x: (
+                x["stability_score"] if not math.isnan(x["stability_score"]) else float("inf"),
+                x["tail_mean_iter_p50_ms_mean"],
+            ),
+        )
+        for idx, row in enumerate(by_stability, start=1):
+            row["rank_by_stability"] = idx
+        by_balanced = sorted(
+            group_rows,
+            key=lambda x: (x["rank_by_iter_p50"] + x["rank_by_stability"], x["rank_by_iter_p50"]),
+        )
+        for idx, row in enumerate(by_balanced, start=1):
+            row["rank_balanced"] = idx
 
     if group_rows:
         with group_csv.open("w", encoding="utf-8", newline="") as f:
@@ -291,6 +386,13 @@ def main():
             writer.writerows(group_rows)
 
     ranked_rows = sorted(group_rows, key=lambda x: x["tail_mean_iter_p50_ms_mean"])
+    ranked_by_stability = sorted(
+        group_rows,
+        key=lambda x: (
+            x["stability_score"] if not math.isnan(x["stability_score"]) else float("inf"),
+            x["tail_mean_iter_p50_ms_mean"],
+        ),
+    )
     if ranked_rows:
         with ranked_csv.open("w", encoding="utf-8", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(ranked_rows[0].keys()))
@@ -319,6 +421,10 @@ def main():
             "gpu_name": best_group["gpu_name"],
             "gpu_cc": best_group["gpu_cc"],
             "tail_mean_iter_p50_ms_mean": best_group["tail_mean_iter_p50_ms_mean"],
+            "tail_mean_iter_p90_ms_mean": best_group["tail_mean_iter_p90_ms_mean"],
+            "stability_score": best_group["stability_score"],
+            "rank_by_stability": best_group["rank_by_stability"],
+            "rank_balanced": best_group["rank_balanced"],
             "tail_steps_per_sec_mean": best_group["tail_steps_per_sec_mean"],
             "tail_samples_per_sec_mean": best_group["tail_samples_per_sec_mean"],
             "speedup_vs_baseline": best_group["speedup_vs_baseline"],
@@ -331,6 +437,7 @@ def main():
         "baseline_group": baseline_group,
         "groups": group_rows,
         "ranked_groups": ranked_rows,
+        "ranked_groups_by_stability": ranked_by_stability,
         "best": best_payload,
         "runs": per_run_rows,
         "skipped_runs": skipped_rows,
@@ -355,6 +462,10 @@ def main():
             env_line("BEST_GPU_NAME", best_payload.get("gpu_name", "")),
             env_line("BEST_GPU_CC", best_payload.get("gpu_cc", "")),
             env_line("BEST_TAIL_MEAN_ITER_P50_MS", best_payload.get("tail_mean_iter_p50_ms_mean", "")),
+            env_line("BEST_TAIL_MEAN_ITER_P90_MS", best_payload.get("tail_mean_iter_p90_ms_mean", "")),
+            env_line("BEST_STABILITY_SCORE", best_payload.get("stability_score", "")),
+            env_line("BEST_RANK_BY_STABILITY", best_payload.get("rank_by_stability", "")),
+            env_line("BEST_RANK_BALANCED", best_payload.get("rank_balanced", "")),
             env_line("BEST_TAIL_STEPS_PER_SEC", best_payload.get("tail_steps_per_sec_mean", "")),
             env_line("BEST_TAIL_SAMPLES_PER_SEC", best_payload.get("tail_samples_per_sec_mean", "")),
             env_line("BEST_SPEEDUP_VS_BASELINE", best_payload.get("speedup_vs_baseline", "")),
@@ -399,6 +510,10 @@ def main():
         lines.append(f"- gpu_name: `{best_payload['gpu_name']}`")
         lines.append(f"- gpu_cc: `{best_payload['gpu_cc']}`")
         lines.append(f"- tail_mean_iter_p50_ms: `{best_payload['tail_mean_iter_p50_ms_mean']:.4f}`")
+        lines.append(f"- tail_mean_iter_p90_ms: `{best_payload['tail_mean_iter_p90_ms_mean']:.4f}`")
+        lines.append(f"- stability_score: `{best_payload['stability_score']:.4f}`")
+        lines.append(f"- rank_by_stability: `{best_payload['rank_by_stability']}`")
+        lines.append(f"- rank_balanced: `{best_payload['rank_balanced']}`")
         lines.append(f"- tail_steps_per_sec: `{best_payload['tail_steps_per_sec_mean']:.4f}`")
         if not math.isnan(best_payload.get("tail_samples_per_sec_mean", math.nan)):
             lines.append(f"- tail_samples_per_sec: `{best_payload['tail_samples_per_sec_mean']:.4f}`")
@@ -410,17 +525,30 @@ def main():
     lines.append("## Group Summary")
     lines.append("")
     if ranked_rows:
-        lines.append("| rank | group | runs | zero_stage | micro_batch | precision | attn_impl | compile | num_workers | prefetch | tail_mean_iter_p50_ms_mean | tail_steps_per_sec_mean | tail_samples_per_sec_mean | speedup_vs_baseline |")
-        lines.append("|---:|---|---:|---|---|---|---|---|---|---|---:|---:|---:|---:|")
-        for idx, row in enumerate(ranked_rows, start=1):
+        lines.append("| rank_iter | rank_stability | rank_balanced | group | runs | zero_stage | micro_batch | precision | attn_impl | compile | num_workers | prefetch | tail_mean_iter_p50_ms_mean | tail_mean_iter_p90_ms_mean | stability_score | unstable_run_ratio | tail_steps_per_sec_mean | tail_samples_per_sec_mean | speedup_vs_baseline |")
+        lines.append("|---:|---:|---:|---|---:|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|")
+        for row in ranked_rows:
             sample_speed = "nan" if math.isnan(row["tail_samples_per_sec_mean"]) else f"{row['tail_samples_per_sec_mean']:.4f}"
             speedup = "nan" if math.isnan(row["speedup_vs_baseline"]) else f"{row['speedup_vs_baseline']:.4f}"
+            stability = "nan" if math.isnan(row["stability_score"]) else f"{row['stability_score']:.4f}"
             lines.append(
-                f"| {idx} | {row['group']} | {row['runs']} | {row['zero_stage']} | {row['micro_batch']} | {row['precision_mode_effective']} | {row['attn_impl_effective']} | {row['torch_compile_enabled']} | {row['num_workers']} | {row['prefetch_factor']} | "
-                f"{row['tail_mean_iter_p50_ms_mean']:.4f} | {row['tail_steps_per_sec_mean']:.4f} | {sample_speed} | {speedup} |"
+                f"| {row['rank_by_iter_p50']} | {row['rank_by_stability']} | {row['rank_balanced']} | {row['group']} | {row['runs']} | {row['zero_stage']} | {row['micro_batch']} | {row['precision_mode_effective']} | {row['attn_impl_effective']} | {row['torch_compile_enabled']} | {row['num_workers']} | {row['prefetch_factor']} | "
+                f"{row['tail_mean_iter_p50_ms_mean']:.4f} | {row['tail_mean_iter_p90_ms_mean']:.4f} | {stability} | {row['unstable_run_ratio']:.4f} | {row['tail_steps_per_sec_mean']:.4f} | {sample_speed} | {speedup} |"
             )
     else:
         lines.append("No successful runs found.")
+
+    if ranked_by_stability:
+        lines.append("")
+        lines.append("## Top Stable Groups")
+        lines.append("")
+        lines.append("| rank_stability | group | rank_iter | rank_balanced | stability_score | tail_mean_iter_p50_ms_mean | tail_mean_iter_p90_ms_mean | unstable_run_ratio |")
+        lines.append("|---:|---|---:|---:|---:|---:|---:|---:|")
+        for row in ranked_by_stability[:10]:
+            stability = "nan" if math.isnan(row["stability_score"]) else f"{row['stability_score']:.4f}"
+            lines.append(
+                f"| {row['rank_by_stability']} | {row['group']} | {row['rank_by_iter_p50']} | {row['rank_balanced']} | {stability} | {row['tail_mean_iter_p50_ms_mean']:.4f} | {row['tail_mean_iter_p90_ms_mean']:.4f} | {row['unstable_run_ratio']:.4f} |"
+            )
 
     if skipped_rows:
         lines.append("")

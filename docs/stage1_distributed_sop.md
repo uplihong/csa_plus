@@ -45,6 +45,9 @@ SWEEP_PREFETCH_LIST=2,4 \
 SWEEP_LOG_EVERY=10 \
 TAIL_TIMING_POINTS=10 \
 HEARTBEAT_EVERY_SEC=30 \
+ENABLE_GPU_TELEMETRY=true \
+GPU_TELEMETRY_INTERVAL_SEC=2 \
+STALL_ALERT_RATIO=2.0 \
 RUN_TIMEOUT_SEC=2400 \
 FAILURE_DUMP_TAIL=true \
 FAIL_TAIL_LINES=80 \
@@ -63,8 +66,8 @@ ENABLE_TORCH_COMPILE=false \
 TORCH_COMPILE_MODE=max-autotune \
 TORCH_COMPILE_DYNAMIC=true \
 ENABLE_LENGTH_FIXED_SLICE=false \
-OUTPUT_ROOT=outputs/bench_4090x2_24h_sweep_stage1_v6 \
-DRIVER_LOG_PATH=outputs/bench_4090x2_24h_sweep_stage1_v6/driver.log \
+OUTPUT_ROOT=outputs/bench_4090x2_24h_sweep_stage1_v6_flash-attn \
+DRIVER_LOG_PATH=outputs/bench_4090x2_24h_sweep_stage1_v6_flash-attn/driver.log \
 ./scripts/run_stage1_ab_bench.sh
 ```
 
@@ -82,6 +85,9 @@ SWEEP_PREFETCH_LIST=2,4 \
 SWEEP_LOG_EVERY=10 \
 TAIL_TIMING_POINTS=10 \
 HEARTBEAT_EVERY_SEC=30 \
+ENABLE_GPU_TELEMETRY=true \
+GPU_TELEMETRY_INTERVAL_SEC=2 \
+STALL_ALERT_RATIO=2.0 \
 RUN_TIMEOUT_SEC=2400 \
 FAILURE_DUMP_TAIL=true \
 FAIL_TAIL_LINES=80 \
@@ -182,9 +188,12 @@ DRIVER_LOG_PATH=outputs/bench_v100x2_sweep_stage1_v5/driver.log \
 Notes:
 
 - `HEARTBEAT_EVERY_SEC=30` prints latest observed step periodically to avoid "silent hanging" perception.
+- `STALL_ALERT_RATIO=2.0` enables heartbeat spike alerts when `iter_ms_p50` jumps abruptly.
 - `RUN_TIMEOUT_SEC=2400` marks a run as failed if it exceeds 40 minutes (tune up/down by your platform quota).
 - `RESUME_RUNS=true` keeps `run_manifest.tsv` and skips already-successful groups when rerunning after interruption.
 - On failure, script now records `exit_code`, `duration_sec`, `last_step` in `run_manifest.tsv` and prints launcher/train tail automatically.
+- `ENABLE_GPU_TELEMETRY=true` writes `gpu_telemetry.csv` for each run (power/utilization/clock snapshots), with interval controlled by `GPU_TELEMETRY_INTERVAL_SEC`.
+- `run_manifest.tsv` now includes `iter_p90_over_p50`, `data_p90_over_p50`, `step_p90_over_p50`, and `unstable_run_flag` for stability diagnosis.
 - `ENABLE_LENGTH_FIXED_SLICE=false` by default. Enable it only for throughput-only A/B tests, e.g. `ENABLE_LENGTH_FIXED_SLICE=true FIXED_SLICE_SECONDS=2.0`.
 - Prefer `DRIVER_LOG_PATH=... ./scripts/run_stage1_ab_bench.sh` over external `| tee ...`. If you still use external `tee`, pre-create the directory first.
 
@@ -194,6 +203,7 @@ Outputs:
 - `outputs/.../per_run_metrics.csv`
 - `outputs/.../group_summary.csv`
 - `outputs/.../ranked_groups.csv`
+- `outputs/.../*/gpu_telemetry.csv` (when telemetry is enabled)
 - `outputs/.../best_config.json`
 - `outputs/.../summary.md`
 

@@ -18,6 +18,7 @@ set -euo pipefail
 # - best_overrides.txt
 # - summary.json
 # - summary.md
+# - <group_run>/gpu_telemetry.csv (optional)
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/bench_stage1_ab_${TIMESTAMP}}"
@@ -54,6 +55,9 @@ TORCH_COMPILE_MODE="${TORCH_COMPILE_MODE:-max-autotune}"
 TORCH_COMPILE_DYNAMIC="${TORCH_COMPILE_DYNAMIC:-true}"
 ENABLE_LENGTH_FIXED_SLICE="${ENABLE_LENGTH_FIXED_SLICE:-false}"
 FIXED_SLICE_SECONDS="${FIXED_SLICE_SECONDS:-}"
+ENABLE_GPU_TELEMETRY="${ENABLE_GPU_TELEMETRY:-true}"
+GPU_TELEMETRY_INTERVAL_SEC="${GPU_TELEMETRY_INTERVAL_SEC:-2}"
+STALL_ALERT_RATIO="${STALL_ALERT_RATIO:-2.0}"
 
 # Baseline group for speedup metric in reports.
 BASELINE_GROUP="${BASELINE_GROUP:-old_like}"
@@ -97,7 +101,7 @@ SWEEP_PREFETCH_LIST="${SWEEP_PREFETCH_LIST:-}"
 mkdir -p "${OUTPUT_ROOT}"
 MANIFEST_PATH="${OUTPUT_ROOT}/run_manifest.tsv"
 
-MANIFEST_HEADER=$'mode\tgroup\trepeat\tstatus\texit_code\tduration_sec\tlast_step\tlast_iter_ms_p50\tport\trun_dir\tlauncher_log\ttrain_log\tzero_stage\tmicro_batch\tworld_size\tglobal_batch\tdeterministic\tcudnn_benchmark\twall_clock_breakdown\tlog_every_steps\tvalidation_every_steps\tcheckpoint_every_steps\tnum_workers\tprefetch_factor\tdataset_manifest_path\tdataset_use_trim\tdataset_offline_trimmed\tenable_cuda_sync_timing\ttiming_rank_scope\tprecision_mode_req\tprecision_mode_effective\tattn_impl_effective\ttorch_compile_enabled\tgpu_name\tgpu_cc'
+MANIFEST_HEADER=$'mode\tgroup\trepeat\tstatus\texit_code\tduration_sec\tlast_step\tlast_iter_ms_p50\titer_p90_over_p50\tdata_p90_over_p50\tstep_p90_over_p50\tunstable_run_flag\tport\trun_dir\tlauncher_log\ttrain_log\tzero_stage\tmicro_batch\tworld_size\tglobal_batch\tdeterministic\tcudnn_benchmark\twall_clock_breakdown\tlog_every_steps\tvalidation_every_steps\tcheckpoint_every_steps\tnum_workers\tprefetch_factor\tdataset_manifest_path\tdataset_use_trim\tdataset_offline_trimmed\tenable_cuda_sync_timing\ttiming_rank_scope\tprecision_mode_req\tprecision_mode_effective\tattn_impl_effective\ttorch_compile_enabled\tgpu_name\tgpu_cc'
 declare -A COMPLETED_RUNS
 
 PYTHON_CMD=(python)
@@ -220,13 +224,16 @@ require_bool "RESUME_RUNS" "${RESUME_RUNS}"
 require_bool "ENABLE_TORCH_COMPILE" "${ENABLE_TORCH_COMPILE}"
 require_bool "TORCH_COMPILE_DYNAMIC" "${TORCH_COMPILE_DYNAMIC}"
 require_bool "ENABLE_LENGTH_FIXED_SLICE" "${ENABLE_LENGTH_FIXED_SLICE}"
+require_bool "ENABLE_GPU_TELEMETRY" "${ENABLE_GPU_TELEMETRY}"
 require_timing_rank_scope "${TIMING_RANK_SCOPE}"
 require_precision_mode "${PRECISION_MODE}"
 require_attn_impl "${ATTN_IMPL}"
 require_nonneg_int "RUN_TIMEOUT_SEC" "${RUN_TIMEOUT_SEC}"
 require_nonneg_int "HEARTBEAT_EVERY_SEC" "${HEARTBEAT_EVERY_SEC}"
+require_pos_int "GPU_TELEMETRY_INTERVAL_SEC" "${GPU_TELEMETRY_INTERVAL_SEC}"
 require_pos_int "FAIL_TAIL_LINES" "${FAIL_TAIL_LINES}"
 require_nonempty "TORCH_COMPILE_MODE" "${TORCH_COMPILE_MODE}"
+require_pos_float "STALL_ALERT_RATIO" "${STALL_ALERT_RATIO}"
 
 if [[ "${ENABLE_LENGTH_FIXED_SLICE}" == "true" ]]; then
   require_nonempty "FIXED_SLICE_SECONDS" "${FIXED_SLICE_SECONDS}"
@@ -509,12 +516,59 @@ extract_last_iter_ms() {
   grep 'Timing(window=' "${log_path}" | tail -n 1 | sed -n 's/.*iter_ms:p50=\([0-9.]*\).*/\1/p' || true
 }
 
+extract_last_timing_ratios() {
+  local log_path="$1"
+  if [[ ! -f "${log_path}" ]]; then
+    echo -e "\t\t\tfalse"
+    return 0
+  fi
+  "${PYTHON_CMD[@]}" - "${log_path}" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+pattern = re.compile(
+    r"Timing\(window=\d+\): "
+    r"data_wait_ms:p50=([0-9]+(?:\.[0-9]+)?) p90=([0-9]+(?:\.[0-9]+)?) \| "
+    r"preprocess_ms:p50=[0-9]+(?:\.[0-9]+)? p90=[0-9]+(?:\.[0-9]+)? \| "
+    r"fwd_ms:p50=[0-9]+(?:\.[0-9]+)? p90=[0-9]+(?:\.[0-9]+)? \| "
+    r"bwd_ms:p50=[0-9]+(?:\.[0-9]+)? p90=[0-9]+(?:\.[0-9]+)? \| "
+    r"step_ms:p50=([0-9]+(?:\.[0-9]+)?) p90=([0-9]+(?:\.[0-9]+)?) \| "
+    r"iter_ms:p50=([0-9]+(?:\.[0-9]+)?) p90=([0-9]+(?:\.[0-9]+)?)"
+)
+last = None
+with open(path, "r", encoding="utf-8", errors="ignore") as f:
+    for line in f:
+        m = pattern.search(line)
+        if m:
+            last = m
+
+if last is None:
+    print("\t\t\tfalse")
+    raise SystemExit(0)
+
+data_p50, data_p90, step_p50, step_p90, iter_p50, iter_p90 = [float(v) for v in last.groups()]
+
+def ratio(p90, p50):
+    if p50 <= 0:
+        return ""
+    return f"{(p90 / p50):.6f}"
+
+iter_ratio = ratio(iter_p90, iter_p50)
+data_ratio = ratio(data_p90, data_p50)
+step_ratio = ratio(step_p90, step_p50)
+unstable = "true" if ((iter_p50 > 0 and iter_p90 / iter_p50 > 2.0) or (step_p50 > 0 and step_p90 / step_p50 > 3.0)) else "false"
+print(f"{iter_ratio}\t{data_ratio}\t{step_ratio}\t{unstable}")
+PY
+}
+
 start_heartbeat() {
   local child_pid="$1"
   local group="$2"
   local repeat="$3"
   local train_log="$4"
   local interval="$5"
+  local stall_alert_ratio="$6"
 
   if [[ "${interval}" -le 0 ]]; then
     echo ""
@@ -522,6 +576,9 @@ start_heartbeat() {
   fi
 
   (
+    local prev_step=""
+    local prev_iter_ms=""
+    local stagnant_count=0
     while kill -0 "${child_pid}" 2>/dev/null; do
       sleep "${interval}"
       if [[ ! -f "${train_log}" ]]; then
@@ -533,6 +590,105 @@ start_heartbeat() {
       step="$(extract_last_step "${train_log}")"
       iter_ms="$(extract_last_iter_ms "${train_log}")"
       echo "[INFO] heartbeat ${group} r${repeat}: last_step=${step:-N/A}, iter_ms_p50=${iter_ms:-N/A}" >&2
+
+      if [[ -n "${step}" && -n "${prev_step}" && "${step}" == "${prev_step}" ]]; then
+        stagnant_count=$((stagnant_count + 1))
+        if [[ "${stagnant_count}" -eq 2 ]] || [[ $((stagnant_count % 4)) -eq 0 ]]; then
+          echo "[WARN] heartbeat ${group} r${repeat}: step has not advanced for $((stagnant_count * interval))s (step=${step})" >&2
+        fi
+      elif [[ -n "${step}" ]]; then
+        stagnant_count=0
+      fi
+
+      if [[ -n "${iter_ms}" && -n "${prev_iter_ms}" ]]; then
+        if awk -v cur="${iter_ms}" -v prev="${prev_iter_ms}" -v ratio="${stall_alert_ratio}" 'BEGIN {exit !(prev > 0 && cur > prev * ratio)}'; then
+          echo "[WARN] heartbeat ${group} r${repeat}: iter_ms_p50 spike detected (${prev_iter_ms} -> ${iter_ms}, ratio>${stall_alert_ratio})" >&2
+        fi
+      fi
+
+      if [[ -n "${step}" ]]; then
+        prev_step="${step}"
+      fi
+      if [[ -n "${iter_ms}" ]]; then
+        prev_iter_ms="${iter_ms}"
+      fi
+    done
+  ) &
+  echo "$!"
+}
+
+extract_include_gpu_ids() {
+  local include="$1"
+  local after_colon="${include#*:}"
+  if [[ "${after_colon}" == "${include}" ]]; then
+    echo ""
+    return 0
+  fi
+  local result=""
+  local token=""
+  IFS=',' read -r -a _ids <<< "${after_colon}"
+  for token in "${_ids[@]}"; do
+    token="${token//[[:space:]]/}"
+    if [[ "${token}" =~ ^[0-9]+$ ]]; then
+      if [[ -z "${result}" ]]; then
+        result="${token}"
+      else
+        result="${result},${token}"
+      fi
+    fi
+  done
+  echo "${result}"
+}
+
+start_gpu_telemetry() {
+  local child_pid="$1"
+  local telemetry_csv="$2"
+  local interval="$3"
+  local include="$4"
+  local gpu_ids="$5"
+
+  if [[ "${ENABLE_GPU_TELEMETRY}" != "true" ]]; then
+    echo ""
+    return 0
+  fi
+  if [[ "${interval}" -le 0 ]]; then
+    echo ""
+    return 0
+  fi
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    echo "[WARN] ENABLE_GPU_TELEMETRY=true but nvidia-smi is not available. Skip telemetry for ${telemetry_csv}" >&2
+    echo ""
+    return 0
+  fi
+
+  (
+    echo "timestamp,epoch_sec,gpu_index,gpu_uuid,gpu_name,temp_c,util_gpu_pct,util_mem_pct,power_w,sm_clock_mhz,mem_clock_mhz,mem_used_mib,mem_total_mib" > "${telemetry_csv}"
+    while kill -0 "${child_pid}" 2>/dev/null; do
+      local ts
+      local epoch
+      ts="$(date -Is)"
+      epoch="$(date +%s)"
+      local nvsmi_cmd=(
+        nvidia-smi
+        --query-gpu=index,uuid,name,temperature.gpu,utilization.gpu,utilization.memory,power.draw,clocks.sm,clocks.mem,memory.used,memory.total
+        --format=csv,noheader,nounits
+      )
+      if [[ -n "${gpu_ids}" ]]; then
+        nvsmi_cmd+=(--id="${gpu_ids}")
+      elif [[ "${include}" == *":"* ]]; then
+        local include_guess
+        include_guess="$(extract_include_gpu_ids "${include}")"
+        if [[ -n "${include_guess}" ]]; then
+          nvsmi_cmd+=(--id="${include_guess}")
+        fi
+      fi
+
+      while IFS= read -r line; do
+        [[ -z "${line}" ]] && continue
+        IFS=',' read -r idx uuid name temp util_gpu util_mem power sm_clk mem_clk mem_used mem_total <<< "${line}"
+        echo "${ts},${epoch},${idx//[[:space:]]/},${uuid//[[:space:]]/},$(echo "${name}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'),${temp//[[:space:]]/},${util_gpu//[[:space:]]/},${util_mem//[[:space:]]/},${power//[[:space:]]/},${sm_clk//[[:space:]]/},${mem_clk//[[:space:]]/},${mem_used//[[:space:]]/},${mem_total//[[:space:]]/}" >> "${telemetry_csv}"
+      done < <("${nvsmi_cmd[@]}" 2>/dev/null || true)
+      sleep "${interval}"
     done
   ) &
   echo "$!"
@@ -541,6 +697,7 @@ start_heartbeat() {
 ACTIVE_RUN_PID=""
 ACTIVE_RUN_PGID=""
 ACTIVE_HEARTBEAT_PID=""
+ACTIVE_TELEMETRY_PID=""
 
 stop_active_heartbeat() {
   if [[ -z "${ACTIVE_HEARTBEAT_PID}" ]]; then
@@ -551,6 +708,17 @@ stop_active_heartbeat() {
     wait "${ACTIVE_HEARTBEAT_PID}" 2>/dev/null || true
   fi
   ACTIVE_HEARTBEAT_PID=""
+}
+
+stop_active_telemetry() {
+  if [[ -z "${ACTIVE_TELEMETRY_PID}" ]]; then
+    return 0
+  fi
+  if kill -0 "${ACTIVE_TELEMETRY_PID}" 2>/dev/null; then
+    kill "${ACTIVE_TELEMETRY_PID}" 2>/dev/null || true
+    wait "${ACTIVE_TELEMETRY_PID}" 2>/dev/null || true
+  fi
+  ACTIVE_TELEMETRY_PID=""
 }
 
 terminate_active_run() {
@@ -600,6 +768,7 @@ run_case() {
   local run_dir="${OUTPUT_ROOT}/${group}_r${repeat}"
   local launcher_log="${run_dir}/launcher.log"
   local train_log="${run_dir}/train.log"
+  local telemetry_csv="${run_dir}/gpu_telemetry.csv"
   local run_key="${mode_name}::${group}::${repeat}"
   if [[ "${RESUME_RUNS}" == "true" && -n "${COMPLETED_RUNS["${run_key}"]+x}" ]]; then
     echo "[INFO] SKIP ${group} r${repeat}: already successful in manifest"
@@ -673,6 +842,12 @@ run_case() {
   local duration_sec=0
   local last_step=""
   local last_iter_ms_p50=""
+  local iter_p90_over_p50=""
+  local data_p90_over_p50=""
+  local step_p90_over_p50=""
+  local unstable_run_flag="false"
+  local include_gpu_ids=""
+  include_gpu_ids="$(extract_include_gpu_ids "${INCLUDE}")"
 
   echo "[INFO] START ${group} r${repeat}: z=${zero_stage}, mb=${micro_batch}, nw=${num_workers}, pf=${prefetch_factor}, port=${port}, precision=${EFFECTIVE_PRECISION_MODE}, attn_impl=${EFFECTIVE_ATTN_IMPL}, compile=${ENABLE_TORCH_COMPILE}"
   echo "[INFO] Logs: launcher=${launcher_log}, train=${train_log}"
@@ -704,6 +879,10 @@ run_case() {
     echo "torch_compile_dynamic=${TORCH_COMPILE_DYNAMIC}"
     echo "gpu_name=${DETECTED_GPU_NAME}"
     echo "gpu_cc=${DETECTED_GPU_CC}"
+    echo "enable_gpu_telemetry=${ENABLE_GPU_TELEMETRY}"
+    echo "gpu_telemetry_interval_sec=${GPU_TELEMETRY_INTERVAL_SEC}"
+    echo "gpu_telemetry_csv=${telemetry_csv}"
+    echo "stall_alert_ratio=${STALL_ALERT_RATIO}"
     echo "enable_length_fixed_slice=${ENABLE_LENGTH_FIXED_SLICE}"
     echo "fixed_slice_seconds=${FIXED_SLICE_SECONDS}"
     echo "run_dir=${run_dir}"
@@ -740,8 +919,11 @@ run_case() {
   ACTIVE_RUN_PGID="${run_pgid}"
 
   local heartbeat_pid=""
-  heartbeat_pid="$(start_heartbeat "${run_pid}" "${group}" "${repeat}" "${train_log}" "${HEARTBEAT_EVERY_SEC}")"
+  heartbeat_pid="$(start_heartbeat "${run_pid}" "${group}" "${repeat}" "${train_log}" "${HEARTBEAT_EVERY_SEC}" "${STALL_ALERT_RATIO}")"
   ACTIVE_HEARTBEAT_PID="${heartbeat_pid}"
+  local telemetry_pid=""
+  telemetry_pid="$(start_gpu_telemetry "${run_pid}" "${telemetry_csv}" "${GPU_TELEMETRY_INTERVAL_SEC}" "${INCLUDE}" "${include_gpu_ids}")"
+  ACTIVE_TELEMETRY_PID="${telemetry_pid}"
 
   if wait "${run_pid}"; then
     exit_code=0
@@ -754,7 +936,12 @@ run_case() {
     kill "${heartbeat_pid}" 2>/dev/null || true
     wait "${heartbeat_pid}" 2>/dev/null || true
   fi
+  if [[ -n "${telemetry_pid}" ]]; then
+    kill "${telemetry_pid}" 2>/dev/null || true
+    wait "${telemetry_pid}" 2>/dev/null || true
+  fi
   ACTIVE_HEARTBEAT_PID=""
+  ACTIVE_TELEMETRY_PID=""
   ACTIVE_RUN_PID=""
   ACTIVE_RUN_PGID=""
 
@@ -762,9 +949,13 @@ run_case() {
   duration_sec=$((run_end_epoch - run_start_epoch))
   last_step="$(extract_last_step "${train_log}")"
   last_iter_ms_p50="$(extract_last_iter_ms "${train_log}")"
+  IFS=$'\t' read -r iter_p90_over_p50 data_p90_over_p50 step_p90_over_p50 unstable_run_flag <<< "$(extract_last_timing_ratios "${train_log}")"
+  if [[ -z "${unstable_run_flag}" ]]; then
+    unstable_run_flag="false"
+  fi
 
   local manifest_row=(
-    "${mode_name}" "${group}" "${repeat}" "${status}" "${exit_code}" "${duration_sec}" "${last_step}" "${last_iter_ms_p50}" "${port}" "${run_dir}" "${launcher_log}" "${train_log}"
+    "${mode_name}" "${group}" "${repeat}" "${status}" "${exit_code}" "${duration_sec}" "${last_step}" "${last_iter_ms_p50}" "${iter_p90_over_p50}" "${data_p90_over_p50}" "${step_p90_over_p50}" "${unstable_run_flag}" "${port}" "${run_dir}" "${launcher_log}" "${train_log}"
     "${zero_stage}" "${micro_batch}" "${WORLD_SIZE}" "${global_batch}"
     "${deterministic}" "${cudnn_benchmark}" "${wall_clock_breakdown}"
     "${log_every}" "${val_every}" "${ckpt_every}" "${num_workers}" "${prefetch_factor}"
@@ -797,7 +988,7 @@ run_case() {
     fi
   else
     COMPLETED_RUNS["${run_key}"]=1
-    echo "[INFO] DONE ${group} r${repeat}: duration_sec=${duration_sec}, last_step=${last_step:-N/A}, last_iter_ms_p50=${last_iter_ms_p50:-N/A}" >&2
+    echo "[INFO] DONE ${group} r${repeat}: duration_sec=${duration_sec}, last_step=${last_step:-N/A}, last_iter_ms_p50=${last_iter_ms_p50:-N/A}, unstable_run_flag=${unstable_run_flag}, iter_p90_over_p50=${iter_p90_over_p50:-N/A}" >&2
   fi
 }
 
@@ -821,6 +1012,7 @@ handle_interrupt() {
   INTERRUPTED=1
   echo "[WARN] Received interrupt signal. Writing partial benchmark summary..." >&2
   stop_active_heartbeat
+  stop_active_telemetry
   terminate_active_run "interrupt signal received"
   exit 130
 }
@@ -852,6 +1044,7 @@ generate_summary() {
 finalize_on_exit() {
   local exit_code="$1"
   stop_active_heartbeat
+  stop_active_telemetry
   terminate_active_run "script exiting"
   if [[ "${SUMMARY_RAN}" -eq 0 ]]; then
     if ! generate_summary; then
@@ -875,6 +1068,7 @@ echo "[INFO] Timing flags: enable_cuda_sync_timing=${ENABLE_CUDA_SYNC_TIMING}, t
 echo "[INFO] Runtime profile: gpu_name=${DETECTED_GPU_NAME}, gpu_cc=${DETECTED_GPU_CC}, min_cc_major=${DETECTED_MIN_CC_MAJOR}, flash_attn2_available=${FLASH_ATTN2_AVAILABLE}"
 echo "[INFO] Precision/attention: requested_precision=${PRECISION_MODE}, effective_precision=${EFFECTIVE_PRECISION_MODE}, requested_attn_impl=${ATTN_IMPL}, effective_attn_impl=${EFFECTIVE_ATTN_IMPL}"
 echo "[INFO] Compile/fixed-slice: enable_torch_compile=${ENABLE_TORCH_COMPILE}, torch_compile_mode=${TORCH_COMPILE_MODE}, torch_compile_dynamic=${TORCH_COMPILE_DYNAMIC}, enable_length_fixed_slice=${ENABLE_LENGTH_FIXED_SLICE}, fixed_slice_seconds=${FIXED_SLICE_SECONDS:-<none>}"
+echo "[INFO] Telemetry/stall-alert: enable_gpu_telemetry=${ENABLE_GPU_TELEMETRY}, gpu_telemetry_interval_sec=${GPU_TELEMETRY_INTERVAL_SEC}, stall_alert_ratio=${STALL_ALERT_RATIO}"
 echo "[INFO] Driver log path: ${DRIVER_LOG_PATH:-<disabled>}"
 
 if [[ "${MODE}" == "ab" || "${MODE}" == "both" ]]; then
