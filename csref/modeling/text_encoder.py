@@ -17,6 +17,7 @@ class Bert(nn.Module):
         super(Bert, self).__init__()
 
         self.hidden_state_index = hidden_state_index
+        self.freeze_model = bool(freeze_model)
 
         from_pretrained_kwargs = {}
         if attn_implementation:
@@ -35,8 +36,10 @@ class Bert(nn.Module):
             else:
                 raise
 
-        if freeze_model:
+        if self.freeze_model:
             self.frozen(self.model)
+            # Keep frozen text encoder deterministic and avoid dropout noise.
+            self.model.eval()
 
         if gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
@@ -50,15 +53,32 @@ class Bert(nn.Module):
             for param in module.parameters():
                 param.requires_grad = False
 
+    def train(self, mode: bool = True):
+        """When text encoder is frozen, always keep its backbone in eval mode."""
+        super().train(mode)
+        if self.freeze_model:
+            self.model.eval()
+        return self
+
     def forward(self, text_ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         need_hidden_states = self.hidden_state_index != -1
-        output = self.model(
-            input_ids=text_ids,
-            attention_mask=mask,
-            output_attentions=False,
-            output_hidden_states=need_hidden_states,
-            return_dict=True
-        )
+        if self.freeze_model:
+            with torch.no_grad():
+                output = self.model(
+                    input_ids=text_ids,
+                    attention_mask=mask,
+                    output_attentions=False,
+                    output_hidden_states=need_hidden_states,
+                    return_dict=True
+                )
+        else:
+            output = self.model(
+                input_ids=text_ids,
+                attention_mask=mask,
+                output_attentions=False,
+                output_hidden_states=need_hidden_states,
+                return_dict=True
+            )
 
         if self.hidden_state_index == -1:
             hidden_state = output.last_hidden_state
@@ -66,4 +86,6 @@ class Bert(nn.Module):
             hidden_state = output.hidden_states[self.hidden_state_index]
         feat = hidden_state[:, 0, :]  # corresponding to [CLS] token
 
+        if self.freeze_model:
+            return feat.detach()
         return feat

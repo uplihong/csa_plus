@@ -31,18 +31,18 @@ The benchmark script records requested/effective precision + attention mode in `
 
 ## 3. Sweep (complete matrix + partial summary on interrupt)
 
-### 2x4090
+### 3.1 2x4090
 ```bash
 MODE=sweep \
-INCLUDE=localhost:0,1,2,3 \
-REPEATS=2 \
+INCLUDE=localhost:0,1 \
+REPEATS=1 \
 STOP_ON_ERROR=0 \
-MAX_STEPS=2000 \
+MAX_STEPS=600 \
 SWEEP_ZERO_STAGES=0,1 \
 SWEEP_MICRO_BATCHES=128,160,192 \
 SWEEP_NUM_WORKERS_LIST=4,6,8 \
 SWEEP_PREFETCH_LIST=2,4 \
-SWEEP_LOG_EVERY=50 \
+SWEEP_LOG_EVERY=10 \
 TAIL_TIMING_POINTS=10 \
 HEARTBEAT_EVERY_SEC=30 \
 RUN_TIMEOUT_SEC=2400 \
@@ -63,18 +63,18 @@ ENABLE_TORCH_COMPILE=false \
 TORCH_COMPILE_MODE=max-autotune \
 TORCH_COMPILE_DYNAMIC=true \
 ENABLE_LENGTH_FIXED_SLICE=false \
-OUTPUT_ROOT=outputs/bench_4090_sweep_stage1_v5 \
-DRIVER_LOG_PATH=outputs/bench_4090_sweep_stage1_v5/driver.log \
+OUTPUT_ROOT=outputs/bench_4090x2_24h_sweep_stage1_v6 \
+DRIVER_LOG_PATH=outputs/bench_4090x2_24h_sweep_stage1_v6/driver.log \
 ./scripts/run_stage1_ab_bench.sh
 ```
 
-### 2xv100
+#### 12h
 ```bash
 MODE=sweep \
-INCLUDE=localhost:0,4 \
+INCLUDE=localhost:0,1 \
 REPEATS=1 \
 STOP_ON_ERROR=0 \
-MAX_STEPS=2000 \
+MAX_STEPS=500 \
 SWEEP_ZERO_STAGES=0,1 \
 SWEEP_MICRO_BATCHES=128,160,192,224 \
 SWEEP_NUM_WORKERS_LIST=4,6,8 \
@@ -100,8 +100,82 @@ ENABLE_TORCH_COMPILE=false \
 TORCH_COMPILE_MODE=max-autotune \
 TORCH_COMPILE_DYNAMIC=true \
 ENABLE_LENGTH_FIXED_SLICE=false \
-OUTPUT_ROOT=outputs/bench_4090_sweep_stage1_v5 \
-DRIVER_LOG_PATH=outputs/bench_4090_sweep_stage1_v5/driver.log \
+OUTPUT_ROOT=outputs/bench_4090x2_12h_sweep_stage1_v5 \
+DRIVER_LOG_PATH=outputs/bench_4090x2_12h_sweep_stage1_v5/driver.log \
+./scripts/run_stage1_ab_bench.sh
+```
+
+### 3.2 4x4090
+```bash
+MODE=sweep \
+INCLUDE=localhost:0,1,2,3 \
+REPEATS=2 \
+STOP_ON_ERROR=0 \
+MAX_STEPS=1000 \
+SWEEP_ZERO_STAGES=0,1 \
+SWEEP_MICRO_BATCHES=128,160,192,224,256 \
+SWEEP_NUM_WORKERS_LIST=4,6,8 \
+SWEEP_PREFETCH_LIST=2,4 \
+SWEEP_LOG_EVERY=50 \
+TAIL_TIMING_POINTS=10 \
+HEARTBEAT_EVERY_SEC=30 \
+RUN_TIMEOUT_SEC=2400 \
+FAILURE_DUMP_TAIL=true \
+FAIL_TAIL_LINES=80 \
+RESUME_RUNS=true \
+SWEEP_VALIDATION_EVERY=1000000 \
+SWEEP_CHECKPOINT_EVERY=1000000 \
+DATASET_ROOT=data/LibriSpeech/LibriSpeech_16k_trim \
+DATASET_MANIFEST_PATH=data/LibriSpeech/LibriSpeech_16k_trim/manifest_16k_trim.tsv \
+DATASET_USE_TRIM=false \
+DATASET_OFFLINE_TRIMMED=true \
+ENABLE_CUDA_SYNC_TIMING=false \
+TIMING_RANK_SCOPE=rank0 \
+PRECISION_MODE=auto \
+ATTN_IMPL=auto \
+ENABLE_TORCH_COMPILE=false \
+TORCH_COMPILE_MODE=max-autotune \
+TORCH_COMPILE_DYNAMIC=true \
+ENABLE_LENGTH_FIXED_SLICE=false \
+OUTPUT_ROOT=outputs/bench_4090x4_sweep_stage1_v5 \
+DRIVER_LOG_PATH=outputs/bench_4090x4_sweep_stage1_v5/driver.log \
+./scripts/run_stage1_ab_bench.sh
+```
+
+### 3.3 2xv100
+```bash
+MODE=sweep \
+INCLUDE=localhost:0,4 \
+REPEATS=1 \
+STOP_ON_ERROR=0 \
+MAX_STEPS=1000 \
+SWEEP_ZERO_STAGES=0,1 \
+SWEEP_MICRO_BATCHES=128,160,192,224 \
+SWEEP_NUM_WORKERS_LIST=4,6,8 \
+SWEEP_PREFETCH_LIST=2,4 \
+SWEEP_LOG_EVERY=10 \
+TAIL_TIMING_POINTS=10 \
+HEARTBEAT_EVERY_SEC=30 \
+RUN_TIMEOUT_SEC=2400 \
+FAILURE_DUMP_TAIL=true \
+FAIL_TAIL_LINES=80 \
+RESUME_RUNS=true \
+SWEEP_VALIDATION_EVERY=1000000 \
+SWEEP_CHECKPOINT_EVERY=1000000 \
+DATASET_ROOT=data/LibriSpeech/LibriSpeech_16k_trim \
+DATASET_MANIFEST_PATH=data/LibriSpeech/LibriSpeech_16k_trim/manifest_16k_trim.tsv \
+DATASET_USE_TRIM=false \
+DATASET_OFFLINE_TRIMMED=true \
+ENABLE_CUDA_SYNC_TIMING=false \
+TIMING_RANK_SCOPE=rank0 \
+PRECISION_MODE=auto \
+ATTN_IMPL=auto \
+ENABLE_TORCH_COMPILE=false \
+TORCH_COMPILE_MODE=max-autotune \
+TORCH_COMPILE_DYNAMIC=true \
+ENABLE_LENGTH_FIXED_SLICE=false \
+OUTPUT_ROOT=outputs/bench_v100x2_sweep_stage1_v5 \
+DRIVER_LOG_PATH=outputs/bench_v100x2_sweep_stage1_v5/driver.log \
 ./scripts/run_stage1_ab_bench.sh
 ```
 
