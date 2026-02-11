@@ -101,13 +101,51 @@ SWEEP_PREFETCH_LIST="${SWEEP_PREFETCH_LIST:-}"
 mkdir -p "${OUTPUT_ROOT}"
 MANIFEST_PATH="${OUTPUT_ROOT}/run_manifest.tsv"
 
-MANIFEST_HEADER=$'mode\tgroup\trepeat\tstatus\texit_code\tduration_sec\tlast_step\tlast_iter_ms_p50\titer_p90_over_p50\tdata_p90_over_p50\tstep_p90_over_p50\tunstable_run_flag\tport\trun_dir\tlauncher_log\ttrain_log\tzero_stage\tmicro_batch\tworld_size\tglobal_batch\tdeterministic\tcudnn_benchmark\twall_clock_breakdown\tlog_every_steps\tvalidation_every_steps\tcheckpoint_every_steps\tnum_workers\tprefetch_factor\tdataset_manifest_path\tdataset_use_trim\tdataset_offline_trimmed\tenable_cuda_sync_timing\ttiming_rank_scope\tprecision_mode_req\tprecision_mode_effective\tattn_impl_effective\ttorch_compile_enabled\tgpu_name\tgpu_cc'
+MANIFEST_HEADER=$'mode\tgroup\trepeat\tstatus\texit_code\tduration_sec\tlast_step\tlast_iter_ms_p50\titer_p90_over_p50\tdata_p90_over_p50\tstep_p90_over_p50\tunstable_run_flag\tport\trun_dir\tlauncher_log\ttrain_log\tzero_stage\tmicro_batch\tworld_size\tglobal_batch\tdeterministic\tcudnn_benchmark\twall_clock_breakdown\tlog_every_steps\tvalidation_every_steps\tcheckpoint_every_steps\tnum_workers\tprefetch_factor\tdataset_manifest_path\tdataset_use_trim\tdataset_offline_trimmed\tenable_cuda_sync_timing\ttiming_rank_scope\tprecision_mode_req\tprecision_mode_effective\tattn_impl_effective\ttorch_compile_enabled\tgpu_name\tgpu_cc\tgit_commit_hash\tgit_commit_short\tgit_branch\tgit_dirty\tgpu_telemetry_rows\tgpu_telemetry_empty_flag'
 declare -A COMPLETED_RUNS
 
 PYTHON_CMD=(python)
 if [[ -n "${CONDA_ENV}" ]]; then
   PYTHON_CMD=(conda run -n "${CONDA_ENV}" python)
 fi
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GIT_COMMIT_HASH="unknown"
+GIT_COMMIT_SHORT="unknown"
+GIT_BRANCH="unknown"
+GIT_DIRTY="unknown"
+
+detect_git_metadata() {
+  if ! command -v git >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! git -C "${REPO_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local commit_hash=""
+  local commit_short=""
+  local branch=""
+  commit_hash="$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || true)"
+  commit_short="$(git -C "${REPO_ROOT}" rev-parse --short=12 HEAD 2>/dev/null || true)"
+  branch="$(git -C "${REPO_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  if [[ -n "${commit_hash}" ]]; then
+    GIT_COMMIT_HASH="${commit_hash}"
+  fi
+  if [[ -n "${commit_short}" ]]; then
+    GIT_COMMIT_SHORT="${commit_short}"
+  fi
+  if [[ -n "${branch}" ]]; then
+    GIT_BRANCH="${branch}"
+  fi
+  if [[ -n "$(git -C "${REPO_ROOT}" status --porcelain 2>/dev/null || true)" ]]; then
+    GIT_DIRTY="true"
+  else
+    GIT_DIRTY="false"
+  fi
+}
+
+detect_git_metadata
 
 # Optional internal driver log. Prefer this over external `| tee ...` to avoid
 # missing-directory issues before the script starts.
@@ -562,16 +600,36 @@ print(f"{iter_ratio}\t{data_ratio}\t{step_ratio}\t{unstable}")
 PY
 }
 
-start_heartbeat() {
-  local child_pid="$1"
-  local group="$2"
-  local repeat="$3"
-  local train_log="$4"
-  local interval="$5"
-  local stall_alert_ratio="$6"
-
-  if [[ "${interval}" -le 0 ]]; then
+count_telemetry_rows() {
+  local telemetry_csv="$1"
+  if [[ ! -f "${telemetry_csv}" ]]; then
     echo ""
+    return 0
+  fi
+  local line_count=0
+  line_count="$(wc -l < "${telemetry_csv}" || echo 0)"
+  if [[ ! "${line_count}" =~ ^[0-9]+$ ]]; then
+    echo ""
+    return 0
+  fi
+  if [[ "${line_count}" -le 1 ]]; then
+    echo "0"
+    return 0
+  fi
+  echo $((line_count - 1))
+}
+
+start_heartbeat() {
+  local out_pid_var="$1"
+  local child_pid="$2"
+  local group="$3"
+  local repeat="$4"
+  local train_log="$5"
+  local interval="$6"
+  local stall_alert_ratio="$7"
+
+  printf -v "${out_pid_var}" "%s" ""
+  if [[ "${interval}" -le 0 ]]; then
     return 0
   fi
 
@@ -614,7 +672,7 @@ start_heartbeat() {
       fi
     done
   ) &
-  echo "$!"
+  printf -v "${out_pid_var}" "%s" "$!"
 }
 
 extract_include_gpu_ids() {
@@ -641,57 +699,80 @@ extract_include_gpu_ids() {
 }
 
 start_gpu_telemetry() {
-  local child_pid="$1"
-  local telemetry_csv="$2"
-  local interval="$3"
-  local include="$4"
-  local gpu_ids="$5"
+  local out_pid_var="$1"
+  local child_pid="$2"
+  local telemetry_csv="$3"
+  local interval="$4"
+  local include="$5"
+  local gpu_ids="$6"
 
+  printf -v "${out_pid_var}" "%s" ""
   if [[ "${ENABLE_GPU_TELEMETRY}" != "true" ]]; then
-    echo ""
     return 0
   fi
   if [[ "${interval}" -le 0 ]]; then
-    echo ""
     return 0
   fi
   if ! command -v nvidia-smi >/dev/null 2>&1; then
     echo "[WARN] ENABLE_GPU_TELEMETRY=true but nvidia-smi is not available. Skip telemetry for ${telemetry_csv}" >&2
-    echo ""
     return 0
   fi
 
   (
+    local id_filter="${gpu_ids}"
+    local used_id_fallback="false"
+    local sample_rows=0
+    local empty_ticks=0
+    if [[ -z "${id_filter}" && "${include}" == *":"* ]]; then
+      id_filter="$(extract_include_gpu_ids "${include}")"
+    fi
     echo "timestamp,epoch_sec,gpu_index,gpu_uuid,gpu_name,temp_c,util_gpu_pct,util_mem_pct,power_w,sm_clock_mhz,mem_clock_mhz,mem_used_mib,mem_total_mib" > "${telemetry_csv}"
     while kill -0 "${child_pid}" 2>/dev/null; do
       local ts
       local epoch
+      local raw=""
       ts="$(date -Is)"
       epoch="$(date +%s)"
+
       local nvsmi_cmd=(
         nvidia-smi
         --query-gpu=index,uuid,name,temperature.gpu,utilization.gpu,utilization.memory,power.draw,clocks.sm,clocks.mem,memory.used,memory.total
         --format=csv,noheader,nounits
       )
-      if [[ -n "${gpu_ids}" ]]; then
-        nvsmi_cmd+=(--id="${gpu_ids}")
-      elif [[ "${include}" == *":"* ]]; then
-        local include_guess
-        include_guess="$(extract_include_gpu_ids "${include}")"
-        if [[ -n "${include_guess}" ]]; then
-          nvsmi_cmd+=(--id="${include_guess}")
-        fi
+      if [[ -n "${id_filter}" ]]; then
+        nvsmi_cmd+=(--id="${id_filter}")
+      fi
+      raw="$("${nvsmi_cmd[@]}" 2>/dev/null || true)"
+      if [[ -z "${raw}" && -n "${id_filter}" && "${used_id_fallback}" == "false" ]]; then
+        echo "[WARN] Telemetry query returned empty with --id=${id_filter}; retrying without id filter for ${telemetry_csv}" >&2
+        used_id_fallback="true"
+        id_filter=""
+        raw="$(nvidia-smi --query-gpu=index,uuid,name,temperature.gpu,utilization.gpu,utilization.memory,power.draw,clocks.sm,clocks.mem,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null || true)"
       fi
 
-      while IFS= read -r line; do
-        [[ -z "${line}" ]] && continue
-        IFS=',' read -r idx uuid name temp util_gpu util_mem power sm_clk mem_clk mem_used mem_total <<< "${line}"
-        echo "${ts},${epoch},${idx//[[:space:]]/},${uuid//[[:space:]]/},$(echo "${name}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'),${temp//[[:space:]]/},${util_gpu//[[:space:]]/},${util_mem//[[:space:]]/},${power//[[:space:]]/},${sm_clk//[[:space:]]/},${mem_clk//[[:space:]]/},${mem_used//[[:space:]]/},${mem_total//[[:space:]]/}" >> "${telemetry_csv}"
-      done < <("${nvsmi_cmd[@]}" 2>/dev/null || true)
+      if [[ -n "${raw}" ]]; then
+        local line=""
+        empty_ticks=0
+        while IFS= read -r line; do
+          [[ -z "${line}" ]] && continue
+          local idx uuid name temp util_gpu util_mem power sm_clk mem_clk mem_used mem_total
+          IFS=',' read -r idx uuid name temp util_gpu util_mem power sm_clk mem_clk mem_used mem_total <<< "${line}"
+          echo "${ts},${epoch},${idx//[[:space:]]/},${uuid//[[:space:]]/},$(echo "${name}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'),${temp//[[:space:]]/},${util_gpu//[[:space:]]/},${util_mem//[[:space:]]/},${power//[[:space:]]/},${sm_clk//[[:space:]]/},${mem_clk//[[:space:]]/},${mem_used//[[:space:]]/},${mem_total//[[:space:]]/}" >> "${telemetry_csv}"
+          sample_rows=$((sample_rows + 1))
+        done <<< "${raw}"
+      else
+        empty_ticks=$((empty_ticks + 1))
+        if [[ "${empty_ticks}" -eq 1 || $((empty_ticks % 15)) -eq 0 ]]; then
+          echo "[WARN] Telemetry query produced no rows (tick=${empty_ticks}): ${telemetry_csv}" >&2
+        fi
+      fi
       sleep "${interval}"
     done
+    if [[ "${sample_rows}" -eq 0 ]]; then
+      echo "[WARN] Telemetry exited with zero samples: ${telemetry_csv}" >&2
+    fi
   ) &
-  echo "$!"
+  printf -v "${out_pid_var}" "%s" "$!"
 }
 
 ACTIVE_RUN_PID=""
@@ -846,6 +927,8 @@ run_case() {
   local data_p90_over_p50=""
   local step_p90_over_p50=""
   local unstable_run_flag="false"
+  local gpu_telemetry_rows=""
+  local gpu_telemetry_empty_flag="false"
   local include_gpu_ids=""
   include_gpu_ids="$(extract_include_gpu_ids "${INCLUDE}")"
 
@@ -879,6 +962,10 @@ run_case() {
     echo "torch_compile_dynamic=${TORCH_COMPILE_DYNAMIC}"
     echo "gpu_name=${DETECTED_GPU_NAME}"
     echo "gpu_cc=${DETECTED_GPU_CC}"
+    echo "git_commit_hash=${GIT_COMMIT_HASH}"
+    echo "git_commit_short=${GIT_COMMIT_SHORT}"
+    echo "git_branch=${GIT_BRANCH}"
+    echo "git_dirty=${GIT_DIRTY}"
     echo "enable_gpu_telemetry=${ENABLE_GPU_TELEMETRY}"
     echo "gpu_telemetry_interval_sec=${GPU_TELEMETRY_INTERVAL_SEC}"
     echo "gpu_telemetry_csv=${telemetry_csv}"
@@ -919,10 +1006,10 @@ run_case() {
   ACTIVE_RUN_PGID="${run_pgid}"
 
   local heartbeat_pid=""
-  heartbeat_pid="$(start_heartbeat "${run_pid}" "${group}" "${repeat}" "${train_log}" "${HEARTBEAT_EVERY_SEC}" "${STALL_ALERT_RATIO}")"
+  start_heartbeat heartbeat_pid "${run_pid}" "${group}" "${repeat}" "${train_log}" "${HEARTBEAT_EVERY_SEC}" "${STALL_ALERT_RATIO}"
   ACTIVE_HEARTBEAT_PID="${heartbeat_pid}"
   local telemetry_pid=""
-  telemetry_pid="$(start_gpu_telemetry "${run_pid}" "${telemetry_csv}" "${GPU_TELEMETRY_INTERVAL_SEC}" "${INCLUDE}" "${include_gpu_ids}")"
+  start_gpu_telemetry telemetry_pid "${run_pid}" "${telemetry_csv}" "${GPU_TELEMETRY_INTERVAL_SEC}" "${INCLUDE}" "${include_gpu_ids}"
   ACTIVE_TELEMETRY_PID="${telemetry_pid}"
 
   if wait "${run_pid}"; then
@@ -953,6 +1040,18 @@ run_case() {
   if [[ -z "${unstable_run_flag}" ]]; then
     unstable_run_flag="false"
   fi
+  gpu_telemetry_rows="$(count_telemetry_rows "${telemetry_csv}")"
+  if [[ "${ENABLE_GPU_TELEMETRY}" == "true" ]]; then
+    if [[ -z "${gpu_telemetry_rows}" || ! "${gpu_telemetry_rows}" =~ ^[0-9]+$ ]]; then
+      gpu_telemetry_empty_flag="true"
+      echo "[WARN] Telemetry enabled but no samples were collected: ${telemetry_csv}" >&2
+      gpu_telemetry_rows="0"
+    elif [[ "${gpu_telemetry_rows}" -le 0 ]]; then
+      gpu_telemetry_empty_flag="true"
+      echo "[WARN] Telemetry enabled but no samples were collected: ${telemetry_csv}" >&2
+      gpu_telemetry_rows="0"
+    fi
+  fi
 
   local manifest_row=(
     "${mode_name}" "${group}" "${repeat}" "${status}" "${exit_code}" "${duration_sec}" "${last_step}" "${last_iter_ms_p50}" "${iter_p90_over_p50}" "${data_p90_over_p50}" "${step_p90_over_p50}" "${unstable_run_flag}" "${port}" "${run_dir}" "${launcher_log}" "${train_log}"
@@ -960,7 +1059,7 @@ run_case() {
     "${deterministic}" "${cudnn_benchmark}" "${wall_clock_breakdown}"
     "${log_every}" "${val_every}" "${ckpt_every}" "${num_workers}" "${prefetch_factor}"
     "${DATASET_MANIFEST_PATH}" "${DATASET_USE_TRIM}" "${DATASET_OFFLINE_TRIMMED}" "${ENABLE_CUDA_SYNC_TIMING}" "${TIMING_RANK_SCOPE}"
-    "${PRECISION_MODE}" "${EFFECTIVE_PRECISION_MODE}" "${EFFECTIVE_ATTN_IMPL}" "${ENABLE_TORCH_COMPILE}" "${DETECTED_GPU_NAME}" "${DETECTED_GPU_CC}"
+    "${PRECISION_MODE}" "${EFFECTIVE_PRECISION_MODE}" "${EFFECTIVE_ATTN_IMPL}" "${ENABLE_TORCH_COMPILE}" "${DETECTED_GPU_NAME}" "${DETECTED_GPU_CC}" "${GIT_COMMIT_HASH}" "${GIT_COMMIT_SHORT}" "${GIT_BRANCH}" "${GIT_DIRTY}" "${gpu_telemetry_rows}" "${gpu_telemetry_empty_flag}"
   )
   (
     IFS=$'\t'
@@ -1067,6 +1166,7 @@ echo "[INFO] Dataset root=${DATASET_ROOT}, manifest=${DATASET_MANIFEST_PATH:-<no
 echo "[INFO] Timing flags: enable_cuda_sync_timing=${ENABLE_CUDA_SYNC_TIMING}, timing_rank_scope=${TIMING_RANK_SCOPE}"
 echo "[INFO] Runtime profile: gpu_name=${DETECTED_GPU_NAME}, gpu_cc=${DETECTED_GPU_CC}, min_cc_major=${DETECTED_MIN_CC_MAJOR}, flash_attn2_available=${FLASH_ATTN2_AVAILABLE}"
 echo "[INFO] Precision/attention: requested_precision=${PRECISION_MODE}, effective_precision=${EFFECTIVE_PRECISION_MODE}, requested_attn_impl=${ATTN_IMPL}, effective_attn_impl=${EFFECTIVE_ATTN_IMPL}"
+echo "[INFO] Code revision: git_commit=${GIT_COMMIT_SHORT}, branch=${GIT_BRANCH}, dirty=${GIT_DIRTY}"
 echo "[INFO] Compile/fixed-slice: enable_torch_compile=${ENABLE_TORCH_COMPILE}, torch_compile_mode=${TORCH_COMPILE_MODE}, torch_compile_dynamic=${TORCH_COMPILE_DYNAMIC}, enable_length_fixed_slice=${ENABLE_LENGTH_FIXED_SLICE}, fixed_slice_seconds=${FIXED_SLICE_SECONDS:-<none>}"
 echo "[INFO] Telemetry/stall-alert: enable_gpu_telemetry=${ENABLE_GPU_TELEMETRY}, gpu_telemetry_interval_sec=${GPU_TELEMETRY_INTERVAL_SEC}, stall_alert_ratio=${STALL_ALERT_RATIO}"
 echo "[INFO] Driver log path: ${DRIVER_LOG_PATH:-<disabled>}"

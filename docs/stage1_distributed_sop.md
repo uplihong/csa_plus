@@ -185,6 +185,159 @@ DRIVER_LOG_PATH=outputs/bench_v100x2_sweep_stage1_v5/driver.log \
 ./scripts/run_stage1_ab_bench.sh
 ```
 
+### 3.4 2x4090
+
+> Phase B：稳定性优先的 4090 诊断（1-2 天）
+固定两个哨兵组：z0_mb128_nw6_pf4 与 z1_mb160_nw6_pf2，每组 3 次。
+强制 TIMING_RANK_SCOPE=all，采集 rank 级 timing 与 gpu_telemetry.csv。
+输出判定：若 iter_p90/p50 持续 >2 或双卡 util 反相关明显，则判定为平台抖动主导，不进入算子优化阶段。
+
+> Phase C：参数收敛与生产候选（1 天）
+V100 候选：吞吐优先 z0_mb160_nw6_pf2，时延优先 z0_mb128_nw6_pf2。
+4090 候选：吞吐优先先用 z0_mb192_nw4_pf2（24h 完成集中最优 samples/s），时延优先 z0_mb128_nw6_pf4。
+若 12h 平台可复现高功率稳定态，再追加 mb224 作为吞吐特化候选。
+
+> Phase D：算子级增益（在 B 稳定后再做，1-2 天）
+先 A/B flash_attention_2（仅 4090/H100）；不可用自动回退 sdpa。
+再 A/B torch.compile（仅对稳定平台），保留失败回退。
+最后单独评估 fixed_slice_seconds=2.0 作为吞吐特化配置，不混入默认基线。
+
+#### 3.4.1 B
+
+先统一设置一组公共参数（按 2x4090）：
+
+```bash
+export INCLUDE=localhost:0,1
+export STOP_ON_ERROR=0
+export FAILURE_DUMP_TAIL=true
+export FAIL_TAIL_LINES=120
+export RESUME_RUNS=true
+export HEARTBEAT_EVERY_SEC=30
+export RUN_TIMEOUT_SEC=2400
+export TAIL_TIMING_POINTS=10
+
+export DATASET_ROOT=data/LibriSpeech/LibriSpeech_16k_trim
+export DATASET_MANIFEST_PATH=data/LibriSpeech/LibriSpeech_16k_trim/manifest_16k_trim.tsv
+export DATASET_USE_TRIM=false
+export DATASET_OFFLINE_TRIMMED=true
+
+export PRECISION_MODE=auto
+export ATTN_IMPL=auto
+export ENABLE_CUDA_SYNC_TIMING=false
+export ENABLE_GPU_TELEMETRY=true
+export GPU_TELEMETRY_INTERVAL_SEC=2
+export STALL_ALERT_RATIO=2.0
+
+export SWEEP_LOG_EVERY=50
+export SWEEP_VALIDATION_EVERY=1000000
+export SWEEP_CHECKPOINT_EVERY=1000000
+
+export ENABLE_TORCH_COMPILE=false
+export TORCH_COMPILE_MODE=max-autotune
+export TORCH_COMPILE_DYNAMIC=true
+export ENABLE_LENGTH_FIXED_SLICE=false
+```
+
+哨兵组1: z0_mb128_nw6_pf4, repeat=3
+
+```bash
+MODE=sweep REPEATS=3 MAX_STEPS=1000 TIMING_RANK_SCOPE=all \
+SWEEP_ZERO_STAGES=0 SWEEP_MICRO_BATCHES=128 SWEEP_NUM_WORKERS_LIST=6 SWEEP_PREFETCH_LIST=4 \
+OUTPUT_ROOT=outputs/bench_4090_phaseB_diag \
+DRIVER_LOG_PATH=outputs/bench_4090_phaseB_diag/driver.log \
+./scripts/run_stage1_ab_bench.sh
+```
+
+哨兵组2: z1_mb160_nw6_pf2, repeat=3（同一个 OUTPUT_ROOT，直接追加）
+```bash
+MODE=sweep REPEATS=3 MAX_STEPS=1000 TIMING_RANK_SCOPE=all \
+SWEEP_ZERO_STAGES=1 SWEEP_MICRO_BATCHES=160 SWEEP_NUM_WORKERS_LIST=6 SWEEP_PREFETCH_LIST=2 \
+OUTPUT_ROOT=outputs/bench_4090_phaseB_diag \
+DRIVER_LOG_PATH=outputs/bench_4090_phaseB_diag/driver.log \
+./scripts/run_stage1_ab_bench.sh
+```
+
+一键跑完整 4090 Phase-B 最小矩阵（含自动验收）：
+```bash
+OUTPUT_ROOT=outputs/bench_4090_phaseB_diag \
+INCLUDE=localhost:0,1 \
+./scripts/run_phaseb_4090_stability.sh
+```
+
+单独执行验收脚本（可复用到任意目录）：
+```bash
+./scripts/check_phaseb_stability.py \
+  --output-root outputs/bench_4090_phaseB_diag \
+  --groups sweep_z0_mb128_nw6_pf4,sweep_z1_mb160_nw6_pf2 \
+  --min-repeats 3 \
+  --max-iter-ratio-median 1.5 \
+  --max-iter-ratio-max 2.5 \
+  --max-iter-p50-cv 0.05
+```
+
+#### 3.4.2 C
+
+
+#### 3.4.2 D
+
+
+### 3.5 2xv100
+
+#### 3.4.1 B
+
+先统一设置一组公共参数（按 2xv100）：
+
+```bash
+export INCLUDE=localhost:0,4
+export STOP_ON_ERROR=0
+export FAILURE_DUMP_TAIL=true
+export FAIL_TAIL_LINES=120
+export RESUME_RUNS=true
+export HEARTBEAT_EVERY_SEC=30
+export RUN_TIMEOUT_SEC=2400
+export TAIL_TIMING_POINTS=10
+
+export DATASET_ROOT=data/LibriSpeech/LibriSpeech_16k_trim
+export DATASET_MANIFEST_PATH=data/LibriSpeech/LibriSpeech_16k_trim/manifest_16k_trim.tsv
+export DATASET_USE_TRIM=false
+export DATASET_OFFLINE_TRIMMED=true
+
+export PRECISION_MODE=auto
+export ATTN_IMPL=auto
+export ENABLE_CUDA_SYNC_TIMING=false
+export ENABLE_GPU_TELEMETRY=true
+export GPU_TELEMETRY_INTERVAL_SEC=2
+export STALL_ALERT_RATIO=2.0
+
+export SWEEP_LOG_EVERY=50
+export SWEEP_VALIDATION_EVERY=1000000
+export SWEEP_CHECKPOINT_EVERY=1000000
+
+export ENABLE_TORCH_COMPILE=false
+export TORCH_COMPILE_MODE=max-autotune
+export TORCH_COMPILE_DYNAMIC=true
+export ENABLE_LENGTH_FIXED_SLICE=false
+```
+
+哨兵组1: z0_mb128_nw6_pf4, repeat=3
+
+```bash
+MODE=sweep REPEATS=3 MAX_STEPS=1000 TIMING_RANK_SCOPE=all \
+SWEEP_ZERO_STAGES=0 SWEEP_MICRO_BATCHES=128 SWEEP_NUM_WORKERS_LIST=6 SWEEP_PREFETCH_LIST=4 \
+OUTPUT_ROOT=outputs/bench_v100_phaseB_diag \
+DRIVER_LOG_PATH=outputs/bench_v100_phaseB_diag/driver.log \
+./scripts/run_stage1_ab_bench.sh
+```
+
+哨兵组2: z1_mb160_nw6_pf2, repeat=3（同一个 OUTPUT_ROOT，直接追加）
+```bash
+MODE=sweep REPEATS=3 MAX_STEPS=1000 TIMING_RANK_SCOPE=all \
+SWEEP_ZERO_STAGES=1 SWEEP_MICRO_BATCHES=160 SWEEP_NUM_WORKERS_LIST=6 SWEEP_PREFETCH_LIST=2 \
+OUTPUT_ROOT=outputs/bench_v100_phaseB_diag \
+DRIVER_LOG_PATH=outputs/bench_v100_phaseB_diag/driver.log \
+./scripts/run_stage1_ab_bench.sh
+```
+
 Notes:
 
 - `HEARTBEAT_EVERY_SEC=30` prints latest observed step periodically to avoid "silent hanging" perception.
@@ -193,6 +346,8 @@ Notes:
 - `RESUME_RUNS=true` keeps `run_manifest.tsv` and skips already-successful groups when rerunning after interruption.
 - On failure, script now records `exit_code`, `duration_sec`, `last_step` in `run_manifest.tsv` and prints launcher/train tail automatically.
 - `ENABLE_GPU_TELEMETRY=true` writes `gpu_telemetry.csv` for each run (power/utilization/clock snapshots), with interval controlled by `GPU_TELEMETRY_INTERVAL_SEC`.
+- `run_manifest.tsv` now includes `gpu_telemetry_rows` and `gpu_telemetry_empty_flag` to quickly detect telemetry collection failures.
+- `run_manifest.tsv` now includes `git_commit_hash`, `git_commit_short`, `git_branch`, `git_dirty` for reproducible run-to-code mapping.
 - `run_manifest.tsv` now includes `iter_p90_over_p50`, `data_p90_over_p50`, `step_p90_over_p50`, and `unstable_run_flag` for stability diagnosis.
 - `ENABLE_LENGTH_FIXED_SLICE=false` by default. Enable it only for throughput-only A/B tests, e.g. `ENABLE_LENGTH_FIXED_SLICE=true FIXED_SLICE_SECONDS=2.0`.
 - Prefer `DRIVER_LOG_PATH=... ./scripts/run_stage1_ab_bench.sh` over external `| tee ...`. If you still use external `tee`, pre-create the directory first.

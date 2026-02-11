@@ -218,6 +218,12 @@ def main():
             "torch_compile_enabled": row.get("torch_compile_enabled", ""),
             "gpu_name": row.get("gpu_name", ""),
             "gpu_cc": row.get("gpu_cc", ""),
+            "git_commit_hash": row.get("git_commit_hash", ""),
+            "git_commit_short": row.get("git_commit_short", ""),
+            "git_branch": row.get("git_branch", ""),
+            "git_dirty": row.get("git_dirty", ""),
+            "gpu_telemetry_rows": row.get("gpu_telemetry_rows", ""),
+            "gpu_telemetry_empty_flag": row.get("gpu_telemetry_empty_flag", ""),
             "log_every_steps": row.get("log_every_steps", ""),
             "validation_every_steps": row.get("validation_every_steps", ""),
             "checkpoint_every_steps": row.get("checkpoint_every_steps", ""),
@@ -314,6 +320,9 @@ def main():
         samples_vals = [r["tail_samples_per_sec"] for r in rows if not math.isnan(r["tail_samples_per_sec"])]
         iter_ratio_vals = [r["iter_p90_over_p50"] for r in rows if not math.isnan(r["iter_p90_over_p50"])]
         unstable_runs = [r for r in rows if parse_boolish(r.get("unstable_run_flag", False))]
+        telemetry_rows_vals = [parse_float(r.get("gpu_telemetry_rows", "")) for r in rows]
+        telemetry_rows_vals = [v for v in telemetry_rows_vals if not math.isnan(v)]
+        telemetry_empty_runs = [r for r in rows if parse_boolish(r.get("gpu_telemetry_empty_flag", False))]
         mean_iter = statistics.mean(vals)
         mean_iter_p90 = statistics.mean(vals_p90)
         std_iter = statistics.stdev(vals) if len(vals) > 1 else 0.0
@@ -338,6 +347,9 @@ def main():
                 "torch_compile_enabled": unique_or_mixed(rows, "torch_compile_enabled"),
                 "gpu_name": unique_or_mixed(rows, "gpu_name"),
                 "gpu_cc": unique_or_mixed(rows, "gpu_cc"),
+                "git_commit_short": unique_or_mixed(rows, "git_commit_short"),
+                "git_branch": unique_or_mixed(rows, "git_branch"),
+                "git_dirty": unique_or_mixed(rows, "git_dirty"),
                 "tail_mean_iter_p50_ms_mean": mean_iter,
                 "tail_mean_iter_p90_ms_mean": mean_iter_p90,
                 "tail_mean_iter_p50_ms_std": std_iter,
@@ -354,6 +366,9 @@ def main():
                 "tail_samples_per_sec_std": statistics.stdev(samples_vals) if len(samples_vals) > 1 else 0.0,
                 "unstable_run_count": len(unstable_runs),
                 "unstable_run_ratio": unstable_ratio,
+                "gpu_telemetry_rows_mean": statistics.mean(telemetry_rows_vals) if telemetry_rows_vals else math.nan,
+                "gpu_telemetry_empty_count": len(telemetry_empty_runs),
+                "gpu_telemetry_empty_ratio": (len(telemetry_empty_runs) / len(rows)) if rows else 0.0,
                 "stability_score": stability_score,
                 "speedup_vs_baseline": baseline_mean / mean_iter if not math.isnan(baseline_mean) else math.nan,
             }
@@ -420,6 +435,9 @@ def main():
             "torch_compile_enabled": best_group["torch_compile_enabled"],
             "gpu_name": best_group["gpu_name"],
             "gpu_cc": best_group["gpu_cc"],
+            "git_commit_short": best_group["git_commit_short"],
+            "git_branch": best_group["git_branch"],
+            "git_dirty": best_group["git_dirty"],
             "tail_mean_iter_p50_ms_mean": best_group["tail_mean_iter_p50_ms_mean"],
             "tail_mean_iter_p90_ms_mean": best_group["tail_mean_iter_p90_ms_mean"],
             "stability_score": best_group["stability_score"],
@@ -427,6 +445,8 @@ def main():
             "rank_balanced": best_group["rank_balanced"],
             "tail_steps_per_sec_mean": best_group["tail_steps_per_sec_mean"],
             "tail_samples_per_sec_mean": best_group["tail_samples_per_sec_mean"],
+            "gpu_telemetry_rows_mean": best_group["gpu_telemetry_rows_mean"],
+            "gpu_telemetry_empty_ratio": best_group["gpu_telemetry_empty_ratio"],
             "speedup_vs_baseline": best_group["speedup_vs_baseline"],
         }
 
@@ -461,6 +481,9 @@ def main():
             env_line("BEST_TORCH_COMPILE_ENABLED", best_payload.get("torch_compile_enabled", "")),
             env_line("BEST_GPU_NAME", best_payload.get("gpu_name", "")),
             env_line("BEST_GPU_CC", best_payload.get("gpu_cc", "")),
+            env_line("BEST_GIT_COMMIT_SHORT", best_payload.get("git_commit_short", "")),
+            env_line("BEST_GIT_BRANCH", best_payload.get("git_branch", "")),
+            env_line("BEST_GIT_DIRTY", best_payload.get("git_dirty", "")),
             env_line("BEST_TAIL_MEAN_ITER_P50_MS", best_payload.get("tail_mean_iter_p50_ms_mean", "")),
             env_line("BEST_TAIL_MEAN_ITER_P90_MS", best_payload.get("tail_mean_iter_p90_ms_mean", "")),
             env_line("BEST_STABILITY_SCORE", best_payload.get("stability_score", "")),
@@ -468,6 +491,8 @@ def main():
             env_line("BEST_RANK_BALANCED", best_payload.get("rank_balanced", "")),
             env_line("BEST_TAIL_STEPS_PER_SEC", best_payload.get("tail_steps_per_sec_mean", "")),
             env_line("BEST_TAIL_SAMPLES_PER_SEC", best_payload.get("tail_samples_per_sec_mean", "")),
+            env_line("BEST_GPU_TELEMETRY_ROWS_MEAN", best_payload.get("gpu_telemetry_rows_mean", "")),
+            env_line("BEST_GPU_TELEMETRY_EMPTY_RATIO", best_payload.get("gpu_telemetry_empty_ratio", "")),
             env_line("BEST_SPEEDUP_VS_BASELINE", best_payload.get("speedup_vs_baseline", "")),
         ]
         best_env.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
@@ -509,12 +534,19 @@ def main():
         lines.append(f"- torch_compile_enabled: `{best_payload['torch_compile_enabled']}`")
         lines.append(f"- gpu_name: `{best_payload['gpu_name']}`")
         lines.append(f"- gpu_cc: `{best_payload['gpu_cc']}`")
+        lines.append(f"- git_commit_short: `{best_payload['git_commit_short']}`")
+        lines.append(f"- git_branch: `{best_payload['git_branch']}`")
+        lines.append(f"- git_dirty: `{best_payload['git_dirty']}`")
         lines.append(f"- tail_mean_iter_p50_ms: `{best_payload['tail_mean_iter_p50_ms_mean']:.4f}`")
         lines.append(f"- tail_mean_iter_p90_ms: `{best_payload['tail_mean_iter_p90_ms_mean']:.4f}`")
         lines.append(f"- stability_score: `{best_payload['stability_score']:.4f}`")
         lines.append(f"- rank_by_stability: `{best_payload['rank_by_stability']}`")
         lines.append(f"- rank_balanced: `{best_payload['rank_balanced']}`")
         lines.append(f"- tail_steps_per_sec: `{best_payload['tail_steps_per_sec_mean']:.4f}`")
+        if not math.isnan(best_payload.get("gpu_telemetry_rows_mean", math.nan)):
+            lines.append(f"- gpu_telemetry_rows_mean: `{best_payload['gpu_telemetry_rows_mean']:.2f}`")
+        if not math.isnan(best_payload.get("gpu_telemetry_empty_ratio", math.nan)):
+            lines.append(f"- gpu_telemetry_empty_ratio: `{best_payload['gpu_telemetry_empty_ratio']:.4f}`")
         if not math.isnan(best_payload.get("tail_samples_per_sec_mean", math.nan)):
             lines.append(f"- tail_samples_per_sec: `{best_payload['tail_samples_per_sec_mean']:.4f}`")
         lines.append(f"- best_config JSON: `{best_json}`")
