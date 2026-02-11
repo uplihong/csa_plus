@@ -49,6 +49,27 @@ def make_mask(feature: torch.Tensor) -> torch.Tensor:
     ) == 0).unsqueeze(1).unsqueeze(2)
 
 
+def _parse_torch_dtype(torch_dtype: Optional[str]) -> Optional[torch.dtype]:
+    if torch_dtype is None:
+        return None
+    if isinstance(torch_dtype, torch.dtype):
+        return torch_dtype
+    value = str(torch_dtype).strip().lower()
+    if value in {"", "none", "null", "auto"}:
+        return None
+    mapping = {
+        "bf16": torch.bfloat16,
+        "bfloat16": torch.bfloat16,
+        "fp16": torch.float16,
+        "float16": torch.float16,
+        "fp32": torch.float32,
+        "float32": torch.float32,
+    }
+    if value not in mapping:
+        raise ValueError("torch_dtype must be one of: auto|null|bf16|fp16|fp32")
+    return mapping[value]
+
+
 class Wav2vec2(nn.Module):
     def __init__(
             self,
@@ -66,6 +87,7 @@ class Wav2vec2(nn.Module):
             short_cut: bool = False,
             gradient_checkpointing: bool = False,
             attn_implementation: Optional[str] = None,
+            torch_dtype: Optional[str] = None,
     ):
         super(Wav2vec2, self).__init__()
 
@@ -76,21 +98,52 @@ class Wav2vec2(nn.Module):
         self.use_att_flat_mask = use_att_flat_mask
         self.fusion_times = fusion_times
 
+        resolved_torch_dtype = _parse_torch_dtype(torch_dtype)
+        effective_attn_implementation = attn_implementation
+        if effective_attn_implementation == "flash_attention_2" and (
+                resolved_torch_dtype is None or resolved_torch_dtype == torch.float32
+        ):
+            if torch.cuda.is_available():
+                cc_major, _ = torch.cuda.get_device_capability(0)
+                resolved_torch_dtype = torch.bfloat16 if cc_major >= 8 else torch.float16
+                warnings.warn(
+                    f"flash_attention_2 requires fp16/bf16; forcing torch_dtype={resolved_torch_dtype}.",
+                    RuntimeWarning,
+                )
+            else:
+                warnings.warn(
+                    "flash_attention_2 requested without CUDA runtime; fallback to sdpa.",
+                    RuntimeWarning,
+                )
+                effective_attn_implementation = "sdpa"
+
         from_pretrained_kwargs = {
             "gradient_checkpointing": gradient_checkpointing,
         }
-        if attn_implementation:
-            from_pretrained_kwargs["attn_implementation"] = attn_implementation
+        if effective_attn_implementation:
+            from_pretrained_kwargs["attn_implementation"] = effective_attn_implementation
+        if resolved_torch_dtype is not None:
+            from_pretrained_kwargs["torch_dtype"] = resolved_torch_dtype
 
         try:
             self.model = Wav2Vec2Model.from_pretrained(pretrained_path, **from_pretrained_kwargs)
         except TypeError:
+            recovered = False
             if "attn_implementation" in from_pretrained_kwargs:
                 warnings.warn(
                     "Wav2Vec2Model.from_pretrained does not accept attn_implementation; fallback to default attention.",
                     RuntimeWarning,
                 )
                 from_pretrained_kwargs.pop("attn_implementation")
+                recovered = True
+            if "torch_dtype" in from_pretrained_kwargs:
+                warnings.warn(
+                    "Wav2Vec2Model.from_pretrained does not accept torch_dtype; fallback to transformers default dtype.",
+                    RuntimeWarning,
+                )
+                from_pretrained_kwargs.pop("torch_dtype")
+                recovered = True
+            if recovered:
                 self.model = Wav2Vec2Model.from_pretrained(pretrained_path, **from_pretrained_kwargs)
             else:
                 raise

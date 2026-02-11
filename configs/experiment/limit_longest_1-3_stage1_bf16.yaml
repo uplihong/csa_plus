@@ -30,6 +30,8 @@ train:
   enable_torch_compile: false
   torch_compile_mode: max-autotune
   torch_compile_dynamic: true
+  enable_tf32: true
+  matmul_precision: high
   fixed_slice_seconds: null
   # Variable-length audio + random slice is slower with cudnn benchmark search.
   cudnn_benchmark: false

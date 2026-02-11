@@ -50,6 +50,11 @@ ENABLE_CUDA_SYNC_TIMING="${ENABLE_CUDA_SYNC_TIMING:-false}"
 TIMING_RANK_SCOPE="${TIMING_RANK_SCOPE:-rank0}" # rank0 | all
 PRECISION_MODE="${PRECISION_MODE:-auto}"        # auto | bf16 | fp16
 ATTN_IMPL="${ATTN_IMPL:-auto}"                  # auto | eager | sdpa | flash_attention_2
+SPEECH_ATTN_IMPL="${SPEECH_ATTN_IMPL:-${ATTN_IMPL}}"
+TEXT_ATTN_IMPL="${TEXT_ATTN_IMPL:-${ATTN_IMPL}}"
+MODEL_LOAD_DTYPE="${MODEL_LOAD_DTYPE:-auto}"    # auto | bf16 | fp16 | fp32
+ENABLE_TF32="${ENABLE_TF32:-true}"              # only effective on Ampere/Ada/Hopper
+MATMUL_PRECISION="${MATMUL_PRECISION:-high}"    # high | medium | highest
 ENABLE_TORCH_COMPILE="${ENABLE_TORCH_COMPILE:-false}"
 TORCH_COMPILE_MODE="${TORCH_COMPILE_MODE:-max-autotune}"
 TORCH_COMPILE_DYNAMIC="${TORCH_COMPILE_DYNAMIC:-true}"
@@ -101,7 +106,7 @@ SWEEP_PREFETCH_LIST="${SWEEP_PREFETCH_LIST:-}"
 mkdir -p "${OUTPUT_ROOT}"
 MANIFEST_PATH="${OUTPUT_ROOT}/run_manifest.tsv"
 
-MANIFEST_HEADER=$'mode\tgroup\trepeat\tstatus\texit_code\tduration_sec\tlast_step\tlast_iter_ms_p50\titer_p90_over_p50\tdata_p90_over_p50\tstep_p90_over_p50\tunstable_run_flag\tport\trun_dir\tlauncher_log\ttrain_log\tzero_stage\tmicro_batch\tworld_size\tglobal_batch\tdeterministic\tcudnn_benchmark\twall_clock_breakdown\tlog_every_steps\tvalidation_every_steps\tcheckpoint_every_steps\tnum_workers\tprefetch_factor\tdataset_manifest_path\tdataset_use_trim\tdataset_offline_trimmed\tenable_cuda_sync_timing\ttiming_rank_scope\tprecision_mode_req\tprecision_mode_effective\tattn_impl_effective\ttorch_compile_enabled\tgpu_name\tgpu_cc\tgit_commit_hash\tgit_commit_short\tgit_branch\tgit_dirty\tgpu_telemetry_rows\tgpu_telemetry_empty_flag'
+MANIFEST_HEADER=$'mode\tgroup\trepeat\tstatus\texit_code\tduration_sec\tlast_step\tlast_iter_ms_p50\titer_p90_over_p50\tdata_p90_over_p50\tstep_p90_over_p50\tunstable_run_flag\tport\trun_dir\tlauncher_log\ttrain_log\tzero_stage\tmicro_batch\tworld_size\tglobal_batch\tdeterministic\tcudnn_benchmark\twall_clock_breakdown\tlog_every_steps\tvalidation_every_steps\tcheckpoint_every_steps\tnum_workers\tprefetch_factor\tdataset_manifest_path\tdataset_use_trim\tdataset_offline_trimmed\tenable_cuda_sync_timing\ttiming_rank_scope\tprecision_mode_req\tprecision_mode_effective\tmodel_load_dtype_effective\tattn_impl_effective\tspeech_attn_impl_effective\ttext_attn_impl_effective\ttorch_compile_enabled\ttf32_enabled\tgpu_name\tgpu_cc\tgit_commit_hash\tgit_commit_short\tgit_branch\tgit_dirty\tgpu_telemetry_rows\tgpu_telemetry_empty_flag'
 declare -A COMPLETED_RUNS
 
 PYTHON_CMD=(python)
@@ -217,6 +222,22 @@ require_attn_impl() {
   fi
 }
 
+require_model_load_dtype() {
+  local value="$1"
+  if [[ "${value}" != "auto" && "${value}" != "bf16" && "${value}" != "fp16" && "${value}" != "fp32" ]]; then
+    echo "MODEL_LOAD_DTYPE must be one of: auto, bf16, fp16, fp32. got: ${value}" >&2
+    exit 1
+  fi
+}
+
+require_matmul_precision() {
+  local value="$1"
+  if [[ "${value}" != "high" && "${value}" != "medium" && "${value}" != "highest" ]]; then
+    echo "MATMUL_PRECISION must be one of: high, medium, highest. got: ${value}" >&2
+    exit 1
+  fi
+}
+
 require_nonempty() {
   local name="$1"
   local value="$2"
@@ -263,9 +284,14 @@ require_bool "ENABLE_TORCH_COMPILE" "${ENABLE_TORCH_COMPILE}"
 require_bool "TORCH_COMPILE_DYNAMIC" "${TORCH_COMPILE_DYNAMIC}"
 require_bool "ENABLE_LENGTH_FIXED_SLICE" "${ENABLE_LENGTH_FIXED_SLICE}"
 require_bool "ENABLE_GPU_TELEMETRY" "${ENABLE_GPU_TELEMETRY}"
+require_bool "ENABLE_TF32" "${ENABLE_TF32}"
 require_timing_rank_scope "${TIMING_RANK_SCOPE}"
 require_precision_mode "${PRECISION_MODE}"
 require_attn_impl "${ATTN_IMPL}"
+require_attn_impl "${SPEECH_ATTN_IMPL}"
+require_attn_impl "${TEXT_ATTN_IMPL}"
+require_model_load_dtype "${MODEL_LOAD_DTYPE}"
+require_matmul_precision "${MATMUL_PRECISION}"
 require_nonneg_int "RUN_TIMEOUT_SEC" "${RUN_TIMEOUT_SEC}"
 require_nonneg_int "HEARTBEAT_EVERY_SEC" "${HEARTBEAT_EVERY_SEC}"
 require_pos_int "GPU_TELEMETRY_INTERVAL_SEC" "${GPU_TELEMETRY_INTERVAL_SEC}"
@@ -321,7 +347,11 @@ DETECTED_GPU_CC="unknown"
 DETECTED_MIN_CC_MAJOR="0"
 FLASH_ATTN2_AVAILABLE="false"
 EFFECTIVE_PRECISION_MODE=""
+EFFECTIVE_MODEL_LOAD_DTYPE=""
 EFFECTIVE_ATTN_IMPL=""
+EFFECTIVE_SPEECH_ATTN_IMPL=""
+EFFECTIVE_TEXT_ATTN_IMPL=""
+EFFECTIVE_TF32_ENABLED="false"
 
 detect_hardware_profile() {
   local include="$1"
@@ -445,6 +475,7 @@ resolve_attn_impl() {
   local precision_mode="$2"
   local flash_available="$3"
   local min_cc_major="$4"
+  local source_name="${5:-ATTN_IMPL}"
   if [[ "${requested}" == "auto" ]]; then
     if [[ "${precision_mode}" == "fp16" ]]; then
       echo "eager"
@@ -455,16 +486,84 @@ resolve_attn_impl() {
   fi
 
   if [[ "${requested}" == "flash_attention_2" ]] && { [[ "${flash_available}" != "true" ]] || [[ ! "${min_cc_major}" =~ ^[0-9]+$ ]] || [[ "${min_cc_major}" -lt 8 ]]; }; then
-    echo "[WARN] ATTN_IMPL=flash_attention_2 requested, but flash-attn is unavailable or GPU capability is < 8.0. Fallback to sdpa." >&2
+    echo "[WARN] ${source_name}=flash_attention_2 requested, but flash-attn is unavailable or GPU capability is < 8.0. Fallback to sdpa." >&2
     echo "sdpa"
     return 0
   fi
   echo "${requested}"
 }
 
+resolve_model_load_dtype() {
+  local requested="$1"
+  local precision_mode="$2"
+  case "${requested}" in
+    auto)
+      if [[ "${precision_mode}" == "bf16" || "${precision_mode}" == "fp16" ]]; then
+        echo "${precision_mode}"
+      else
+        echo "fp32"
+      fi
+      ;;
+    bf16|fp16|fp32)
+      echo "${requested}"
+      ;;
+    *)
+      echo "fp32"
+      ;;
+  esac
+}
+
+resolve_tf32_enabled() {
+  local requested="$1"
+  local min_cc_major="$2"
+  if [[ "${requested}" != "true" ]]; then
+    echo "false"
+    return 0
+  fi
+  if [[ "${min_cc_major}" =~ ^[0-9]+$ ]] && [[ "${min_cc_major}" -ge 8 ]]; then
+    echo "true"
+  else
+    echo "[WARN] ENABLE_TF32=true requested, but GPU capability is < 8.0. Force disable TF32." >&2
+    echo "false"
+  fi
+}
+
+harmonize_flash_dtype() {
+  local encoder_name="$1"
+  local attn_impl="$2"
+  local model_dtype="$3"
+  local precision_mode="$4"
+
+  if [[ "${attn_impl}" == "flash_attention_2" && ( -z "${model_dtype}" || "${model_dtype}" == "fp32" ) ]]; then
+    if [[ "${precision_mode}" == "bf16" || "${precision_mode}" == "fp16" ]]; then
+      echo "[WARN] ${encoder_name}: flash_attention_2 requires bf16/fp16. Override model dtype ${model_dtype:-<unset>} -> ${precision_mode}." >&2
+      echo "${precision_mode}"
+      return 0
+    fi
+    echo "[WARN] ${encoder_name}: flash_attention_2 requested but no compatible dtype could be derived from precision=${precision_mode}; keeping dtype=${model_dtype:-<unset>}." >&2
+  fi
+  echo "${model_dtype}"
+}
+
+derive_unified_attn_impl() {
+  local speech_impl="$1"
+  local text_impl="$2"
+  if [[ "${speech_impl}" == "${text_impl}" ]]; then
+    echo "${speech_impl}"
+  else
+    echo "split"
+  fi
+}
+
 detect_hardware_profile "${INCLUDE}"
 EFFECTIVE_PRECISION_MODE="$(resolve_precision_mode "${PRECISION_MODE}" "${DETECTED_MIN_CC_MAJOR}")"
-EFFECTIVE_ATTN_IMPL="$(resolve_attn_impl "${ATTN_IMPL}" "${EFFECTIVE_PRECISION_MODE}" "${FLASH_ATTN2_AVAILABLE}" "${DETECTED_MIN_CC_MAJOR}")"
+EFFECTIVE_MODEL_LOAD_DTYPE="$(resolve_model_load_dtype "${MODEL_LOAD_DTYPE}" "${EFFECTIVE_PRECISION_MODE}")"
+EFFECTIVE_SPEECH_ATTN_IMPL="$(resolve_attn_impl "${SPEECH_ATTN_IMPL}" "${EFFECTIVE_PRECISION_MODE}" "${FLASH_ATTN2_AVAILABLE}" "${DETECTED_MIN_CC_MAJOR}" "SPEECH_ATTN_IMPL")"
+EFFECTIVE_TEXT_ATTN_IMPL="$(resolve_attn_impl "${TEXT_ATTN_IMPL}" "${EFFECTIVE_PRECISION_MODE}" "${FLASH_ATTN2_AVAILABLE}" "${DETECTED_MIN_CC_MAJOR}" "TEXT_ATTN_IMPL")"
+EFFECTIVE_MODEL_LOAD_DTYPE="$(harmonize_flash_dtype "speech_encoder" "${EFFECTIVE_SPEECH_ATTN_IMPL}" "${EFFECTIVE_MODEL_LOAD_DTYPE}" "${EFFECTIVE_PRECISION_MODE}")"
+EFFECTIVE_MODEL_LOAD_DTYPE="$(harmonize_flash_dtype "text_encoder" "${EFFECTIVE_TEXT_ATTN_IMPL}" "${EFFECTIVE_MODEL_LOAD_DTYPE}" "${EFFECTIVE_PRECISION_MODE}")"
+EFFECTIVE_ATTN_IMPL="$(derive_unified_attn_impl "${EFFECTIVE_SPEECH_ATTN_IMPL}" "${EFFECTIVE_TEXT_ATTN_IMPL}")"
+EFFECTIVE_TF32_ENABLED="$(resolve_tf32_enabled "${ENABLE_TF32}" "${DETECTED_MIN_CC_MAJOR}")"
 
 PORT_COUNTER=0
 
@@ -895,14 +994,18 @@ run_case() {
     "++train.enable_torch_compile=${ENABLE_TORCH_COMPILE}"
     "++train.torch_compile_mode=${TORCH_COMPILE_MODE}"
     "++train.torch_compile_dynamic=${TORCH_COMPILE_DYNAMIC}"
+    "++train.enable_tf32=${EFFECTIVE_TF32_ENABLED}"
+    "++train.matmul_precision=${MATMUL_PRECISION}"
     "++train.pretrained_model_checkpoint=${PRETRAINED_CKPT}"
     "++dataset.root_dir=${DATASET_ROOT}"
     "++dataset.use_trim=${DATASET_USE_TRIM}"
     "++dataset.offline_trimmed=${DATASET_OFFLINE_TRIMMED}"
     "++model.speech_encoder.pretrained_path=${SPEECH_MODEL_PATH}"
     "++model.text_encoder.pretrained_path=${TEXT_MODEL_PATH}"
-    "++model.speech_encoder.attn_implementation=${EFFECTIVE_ATTN_IMPL}"
-    "++model.text_encoder.attn_implementation=${EFFECTIVE_ATTN_IMPL}"
+    "++model.speech_encoder.attn_implementation=${EFFECTIVE_SPEECH_ATTN_IMPL}"
+    "++model.text_encoder.attn_implementation=${EFFECTIVE_TEXT_ATTN_IMPL}"
+    "++model.speech_encoder.torch_dtype=${EFFECTIVE_MODEL_LOAD_DTYPE}"
+    "++model.text_encoder.torch_dtype=${EFFECTIVE_MODEL_LOAD_DTYPE}"
     "deepspeed_config_yaml.train_micro_batch_size_per_gpu=${micro_batch}"
     "deepspeed_config_yaml.zero_optimization.stage=${zero_stage}"
     "deepspeed_config_yaml.wall_clock_breakdown=${wall_clock_breakdown}"
@@ -932,7 +1035,7 @@ run_case() {
   local include_gpu_ids=""
   include_gpu_ids="$(extract_include_gpu_ids "${INCLUDE}")"
 
-  echo "[INFO] START ${group} r${repeat}: z=${zero_stage}, mb=${micro_batch}, nw=${num_workers}, pf=${prefetch_factor}, port=${port}, precision=${EFFECTIVE_PRECISION_MODE}, attn_impl=${EFFECTIVE_ATTN_IMPL}, compile=${ENABLE_TORCH_COMPILE}"
+  echo "[INFO] START ${group} r${repeat}: z=${zero_stage}, mb=${micro_batch}, nw=${num_workers}, pf=${prefetch_factor}, port=${port}, precision=${EFFECTIVE_PRECISION_MODE}, model_dtype=${EFFECTIVE_MODEL_LOAD_DTYPE}, speech_attn=${EFFECTIVE_SPEECH_ATTN_IMPL}, text_attn=${EFFECTIVE_TEXT_ATTN_IMPL}, tf32=${EFFECTIVE_TF32_ENABLED}, compile=${ENABLE_TORCH_COMPILE}"
   echo "[INFO] Logs: launcher=${launcher_log}, train=${train_log}"
 
   local exec_cmd=()
@@ -955,11 +1058,19 @@ run_case() {
     echo "global_batch=${global_batch}"
     echo "precision_mode_req=${PRECISION_MODE}"
     echo "precision_mode_effective=${EFFECTIVE_PRECISION_MODE}"
+    echo "model_load_dtype_req=${MODEL_LOAD_DTYPE}"
+    echo "model_load_dtype_effective=${EFFECTIVE_MODEL_LOAD_DTYPE}"
     echo "attn_impl_req=${ATTN_IMPL}"
     echo "attn_impl_effective=${EFFECTIVE_ATTN_IMPL}"
+    echo "speech_attn_impl_req=${SPEECH_ATTN_IMPL}"
+    echo "speech_attn_impl_effective=${EFFECTIVE_SPEECH_ATTN_IMPL}"
+    echo "text_attn_impl_req=${TEXT_ATTN_IMPL}"
+    echo "text_attn_impl_effective=${EFFECTIVE_TEXT_ATTN_IMPL}"
     echo "torch_compile_enabled=${ENABLE_TORCH_COMPILE}"
     echo "torch_compile_mode=${TORCH_COMPILE_MODE}"
     echo "torch_compile_dynamic=${TORCH_COMPILE_DYNAMIC}"
+    echo "tf32_enabled=${EFFECTIVE_TF32_ENABLED}"
+    echo "matmul_precision=${MATMUL_PRECISION}"
     echo "gpu_name=${DETECTED_GPU_NAME}"
     echo "gpu_cc=${DETECTED_GPU_CC}"
     echo "git_commit_hash=${GIT_COMMIT_HASH}"
@@ -1059,7 +1170,7 @@ run_case() {
     "${deterministic}" "${cudnn_benchmark}" "${wall_clock_breakdown}"
     "${log_every}" "${val_every}" "${ckpt_every}" "${num_workers}" "${prefetch_factor}"
     "${DATASET_MANIFEST_PATH}" "${DATASET_USE_TRIM}" "${DATASET_OFFLINE_TRIMMED}" "${ENABLE_CUDA_SYNC_TIMING}" "${TIMING_RANK_SCOPE}"
-    "${PRECISION_MODE}" "${EFFECTIVE_PRECISION_MODE}" "${EFFECTIVE_ATTN_IMPL}" "${ENABLE_TORCH_COMPILE}" "${DETECTED_GPU_NAME}" "${DETECTED_GPU_CC}" "${GIT_COMMIT_HASH}" "${GIT_COMMIT_SHORT}" "${GIT_BRANCH}" "${GIT_DIRTY}" "${gpu_telemetry_rows}" "${gpu_telemetry_empty_flag}"
+    "${PRECISION_MODE}" "${EFFECTIVE_PRECISION_MODE}" "${EFFECTIVE_MODEL_LOAD_DTYPE}" "${EFFECTIVE_ATTN_IMPL}" "${EFFECTIVE_SPEECH_ATTN_IMPL}" "${EFFECTIVE_TEXT_ATTN_IMPL}" "${ENABLE_TORCH_COMPILE}" "${EFFECTIVE_TF32_ENABLED}" "${DETECTED_GPU_NAME}" "${DETECTED_GPU_CC}" "${GIT_COMMIT_HASH}" "${GIT_COMMIT_SHORT}" "${GIT_BRANCH}" "${GIT_DIRTY}" "${gpu_telemetry_rows}" "${gpu_telemetry_empty_flag}"
   )
   (
     IFS=$'\t'
@@ -1165,7 +1276,8 @@ echo "[INFO] Mode=${MODE}, REPEATS=${REPEATS}, MAX_STEPS=${MAX_STEPS}, INCLUDE=$
 echo "[INFO] Dataset root=${DATASET_ROOT}, manifest=${DATASET_MANIFEST_PATH:-<none>}, use_trim=${DATASET_USE_TRIM}, offline_trimmed=${DATASET_OFFLINE_TRIMMED}"
 echo "[INFO] Timing flags: enable_cuda_sync_timing=${ENABLE_CUDA_SYNC_TIMING}, timing_rank_scope=${TIMING_RANK_SCOPE}"
 echo "[INFO] Runtime profile: gpu_name=${DETECTED_GPU_NAME}, gpu_cc=${DETECTED_GPU_CC}, min_cc_major=${DETECTED_MIN_CC_MAJOR}, flash_attn2_available=${FLASH_ATTN2_AVAILABLE}"
-echo "[INFO] Precision/attention: requested_precision=${PRECISION_MODE}, effective_precision=${EFFECTIVE_PRECISION_MODE}, requested_attn_impl=${ATTN_IMPL}, effective_attn_impl=${EFFECTIVE_ATTN_IMPL}"
+echo "[INFO] Precision/attention: requested_precision=${PRECISION_MODE}, effective_precision=${EFFECTIVE_PRECISION_MODE}, requested_model_dtype=${MODEL_LOAD_DTYPE}, effective_model_dtype=${EFFECTIVE_MODEL_LOAD_DTYPE}, requested_attn_impl=${ATTN_IMPL}, effective_attn_impl=${EFFECTIVE_ATTN_IMPL}, speech_attn_impl=${EFFECTIVE_SPEECH_ATTN_IMPL}, text_attn_impl=${EFFECTIVE_TEXT_ATTN_IMPL}"
+echo "[INFO] Math backend: tf32_requested=${ENABLE_TF32}, tf32_effective=${EFFECTIVE_TF32_ENABLED}, matmul_precision=${MATMUL_PRECISION}"
 echo "[INFO] Code revision: git_commit=${GIT_COMMIT_SHORT}, branch=${GIT_BRANCH}, dirty=${GIT_DIRTY}"
 echo "[INFO] Compile/fixed-slice: enable_torch_compile=${ENABLE_TORCH_COMPILE}, torch_compile_mode=${TORCH_COMPILE_MODE}, torch_compile_dynamic=${TORCH_COMPILE_DYNAMIC}, enable_length_fixed_slice=${ENABLE_LENGTH_FIXED_SLICE}, fixed_slice_seconds=${FIXED_SLICE_SECONDS:-<none>}"
 echo "[INFO] Telemetry/stall-alert: enable_gpu_telemetry=${ENABLE_GPU_TELEMETRY}, gpu_telemetry_interval_sec=${GPU_TELEMETRY_INTERVAL_SEC}, stall_alert_ratio=${STALL_ALERT_RATIO}"

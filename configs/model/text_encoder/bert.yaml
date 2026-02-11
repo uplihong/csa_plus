@@ -6,3 +6,4 @@ freeze_model: True
 hidden_state_index: -1
 gradient_checkpointing: False # set to True to save memory at the cost of compute
 attn_implementation: null # set to eager | sdpa | flash_attention_2; null uses transformers default
+torch_dtype: null # set to bf16 | fp16 | fp32; null/auto follows transformers default

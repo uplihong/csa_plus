@@ -29,6 +29,12 @@ export LIBRISPEECH_MANIFEST_PATH=./data/LibriSpeech/LibriSpeech_16k_trim/manifes
 
 The benchmark script records requested/effective precision + attention mode in `run_manifest.tsv`.
 
+Throughput-first defaults:
+- 4090/H100: prefer `zero_stage=0`; use `zero_stage=1` only when memory pressure forces it.
+- `MODEL_LOAD_DTYPE=auto` follows effective precision (`bf16` or `fp16`), which avoids FlashAttention2 dtype mismatch.
+- `SPEECH_ATTN_IMPL` and `TEXT_ATTN_IMPL` can be set independently; if omitted they inherit `ATTN_IMPL`.
+- `ENABLE_TF32=true` is only effective on cc >= 8.0 GPUs.
+
 ## 3. Sweep (complete matrix + partial summary on interrupt)
 
 ### 3.1 2x4090
@@ -223,6 +229,11 @@ export DATASET_OFFLINE_TRIMMED=true
 
 export PRECISION_MODE=auto
 export ATTN_IMPL=auto
+export MODEL_LOAD_DTYPE=auto
+export SPEECH_ATTN_IMPL=auto
+export TEXT_ATTN_IMPL=auto
+export ENABLE_TF32=true
+export MATMUL_PRECISION=high
 export ENABLE_CUDA_SYNC_TIMING=false
 export ENABLE_GPU_TELEMETRY=true
 export GPU_TELEMETRY_INTERVAL_SEC=2
@@ -275,6 +286,214 @@ INCLUDE=localhost:0,1 \
   --max-iter-p50-cv 0.05
 ```
 
+#### 3.4.1.1 跑一次长时 leak 诊断（4090，z0_mb128_nw6_pf4，MAX_STEPS=10000，含主机内存采样）
+
+```bash
+OUT=outputs/leak_4090_z0_$(date +%Y%m%d_%H%M%S)
+mkdir -p "$OUT"
+
+(
+  echo "timestamp,epoch_sec,mem_total_kib,mem_available_kib,swap_total_kib,swap_free_kib,load1,load5,load15,train_proc_count,train_rss_kib,train_vsz_kib" > "$OUT/host_telemetry.csv"
+  while true; do
+    ts=$(date -Is); epoch=$(date +%s)
+    eval "$(awk '
+      /^MemTotal:/ {print "mt="$2}
+      /^MemAvailable:/ {print "ma="$2}
+      /^SwapTotal:/ {print "st="$2}
+      /^SwapFree:/ {print "sf="$2}
+      END {print "mt="mt"\nma="ma"\nst="st"\nsf="sf}
+    ' /proc/meminfo)"
+    read l1 l5 l15 _ < /proc/loadavg
+    read pc pr pv <<< "$(ps -eo pid=,rss=,vsz=,args= | awk 'BEGIN{c=0;r=0;v=0} {pid=$1;rss=$2;vsz=$3;$1=$2=$3=""; sub(/^ +/,"",$0); if($0 ~ /(deepspeed|train.py)/){c++; r+=rss; v+=vsz}} END{printf "%d %d %d", c,r,v}')"
+    echo "$ts,$epoch,$mt,$ma,$st,$sf,$l1,$l5,$l15,$pc,$pr,$pv" >> "$OUT/host_telemetry.csv"
+    sleep 5
+  done
+) &
+MON=$!
+trap 'kill $MON 2>/dev/null || true' EXIT
+
+MODE=sweep \
+INCLUDE=localhost:0,1 \
+REPEATS=1 \
+STOP_ON_ERROR=1 \
+MAX_STEPS=10000 \
+SWEEP_ZERO_STAGES=0 \
+SWEEP_MICRO_BATCHES=128 \
+SWEEP_NUM_WORKERS_LIST=6 \
+SWEEP_PREFETCH_LIST=4 \
+SWEEP_LOG_EVERY=50 \
+TAIL_TIMING_POINTS=20 \
+HEARTBEAT_EVERY_SEC=30 \
+RUN_TIMEOUT_SEC=0 \
+FAILURE_DUMP_TAIL=true \
+FAIL_TAIL_LINES=120 \
+RESUME_RUNS=false \
+SWEEP_VALIDATION_EVERY=1000000 \
+SWEEP_CHECKPOINT_EVERY=1000000 \
+DATASET_ROOT=data/LibriSpeech/LibriSpeech_16k_trim \
+DATASET_MANIFEST_PATH=data/LibriSpeech/LibriSpeech_16k_trim/manifest_16k_trim.tsv \
+DATASET_USE_TRIM=false \
+DATASET_OFFLINE_TRIMMED=true \
+ENABLE_CUDA_SYNC_TIMING=false \
+TIMING_RANK_SCOPE=all \
+PRECISION_MODE=auto \
+ATTN_IMPL=auto \
+ENABLE_TORCH_COMPILE=false \
+TORCH_COMPILE_MODE=max-autotune \
+TORCH_COMPILE_DYNAMIC=true \
+ENABLE_LENGTH_FIXED_SLICE=false \
+ENABLE_GPU_TELEMETRY=true \
+GPU_TELEMETRY_INTERVAL_SEC=2 \
+STALL_ALERT_RATIO=2.0 \
+OUTPUT_ROOT="$OUT" \
+DRIVER_LOG_PATH="$OUT/driver.log" \
+./scripts/run_stage1_ab_bench.sh
+
+kill $MON 2>/dev/null || true
+wait $MON 2>/dev/null || true
+trap - EXIT
+echo "OUT=$OUT"
+```
+
+#### 3.4.1.2 跑一次长时 leak 诊断（4090，z1_mb128_nw6_pf4，MAX_STEPS=10000，含主机内存采样）
+
+```bash
+OUT=outputs/leak_4090_z1_$(date +%Y%m%d_%H%M%S)
+mkdir -p "$OUT"
+
+(
+  echo "timestamp,epoch_sec,mem_total_kib,mem_available_kib,swap_total_kib,swap_free_kib,load1,load5,load15,train_proc_count,train_rss_kib,train_vsz_kib" > "$OUT/host_telemetry.csv"
+  while true; do
+    ts=$(date -Is); epoch=$(date +%s)
+    eval "$(awk '
+      /^MemTotal:/ {print "mt="$2}
+      /^MemAvailable:/ {print "ma="$2}
+      /^SwapTotal:/ {print "st="$2}
+      /^SwapFree:/ {print "sf="$2}
+      END {print "mt="mt"\nma="ma"\nst="st"\nsf="sf}
+    ' /proc/meminfo)"
+    read l1 l5 l15 _ < /proc/loadavg
+    read pc pr pv <<< "$(ps -eo pid=,rss=,vsz=,args= | awk 'BEGIN{c=0;r=0;v=0} {pid=$1;rss=$2;vsz=$3;$1=$2=$3=""; sub(/^ +/,"",$0); if($0 ~ /(deepspeed|train.py)/){c++; r+=rss; v+=vsz}} END{printf "%d %d %d", c,r,v}')"
+    echo "$ts,$epoch,$mt,$ma,$st,$sf,$l1,$l5,$l15,$pc,$pr,$pv" >> "$OUT/host_telemetry.csv"
+    sleep 5
+  done
+) &
+MON=$!
+trap 'kill $MON 2>/dev/null || true' EXIT
+
+MODE=sweep \
+INCLUDE=localhost:0,1 \
+REPEATS=1 \
+STOP_ON_ERROR=1 \
+MAX_STEPS=10000 \
+SWEEP_ZERO_STAGES=1 \
+SWEEP_MICRO_BATCHES=128 \
+SWEEP_NUM_WORKERS_LIST=6 \
+SWEEP_PREFETCH_LIST=4 \
+SWEEP_LOG_EVERY=50 \
+TAIL_TIMING_POINTS=20 \
+HEARTBEAT_EVERY_SEC=30 \
+RUN_TIMEOUT_SEC=0 \
+FAILURE_DUMP_TAIL=true \
+FAIL_TAIL_LINES=120 \
+RESUME_RUNS=false \
+SWEEP_VALIDATION_EVERY=1000000 \
+SWEEP_CHECKPOINT_EVERY=1000000 \
+DATASET_ROOT=data/LibriSpeech/LibriSpeech_16k_trim \
+DATASET_MANIFEST_PATH=data/LibriSpeech/LibriSpeech_16k_trim/manifest_16k_trim.tsv \
+DATASET_USE_TRIM=false \
+DATASET_OFFLINE_TRIMMED=true \
+ENABLE_CUDA_SYNC_TIMING=false \
+TIMING_RANK_SCOPE=all \
+PRECISION_MODE=auto \
+ATTN_IMPL=auto \
+ENABLE_TORCH_COMPILE=false \
+TORCH_COMPILE_MODE=max-autotune \
+TORCH_COMPILE_DYNAMIC=true \
+ENABLE_LENGTH_FIXED_SLICE=false \
+ENABLE_GPU_TELEMETRY=true \
+GPU_TELEMETRY_INTERVAL_SEC=2 \
+STALL_ALERT_RATIO=2.0 \
+OUTPUT_ROOT="$OUT" \
+DRIVER_LOG_PATH="$OUT/driver.log" \
+./scripts/run_stage1_ab_bench.sh
+
+kill $MON 2>/dev/null || true
+wait $MON 2>/dev/null || true
+trap - EXIT
+echo "OUT=$OUT"
+```
+
+
+#### 3.4.1.3 跑一次长时 leak 诊断（4090，z0_mb128_nw6_pf4，MAX_STEPS=10000，含主机内存采样，flash_attention_2）
+
+```bash
+OUT=outputs/leak_4090_z0_flash_attention_2_$(date +%Y%m%d_%H%M%S)
+mkdir -p "$OUT"
+
+(
+  echo "timestamp,epoch_sec,mem_total_kib,mem_available_kib,swap_total_kib,swap_free_kib,load1,load5,load15,train_proc_count,train_rss_kib,train_vsz_kib" > "$OUT/host_telemetry.csv"
+  while true; do
+    ts=$(date -Is); epoch=$(date +%s)
+    eval "$(awk '
+      /^MemTotal:/ {print "mt="$2}
+      /^MemAvailable:/ {print "ma="$2}
+      /^SwapTotal:/ {print "st="$2}
+      /^SwapFree:/ {print "sf="$2}
+      END {print "mt="mt"\nma="ma"\nst="st"\nsf="sf}
+    ' /proc/meminfo)"
+    read l1 l5 l15 _ < /proc/loadavg
+    read pc pr pv <<< "$(ps -eo pid=,rss=,vsz=,args= | awk 'BEGIN{c=0;r=0;v=0} {pid=$1;rss=$2;vsz=$3;$1=$2=$3=""; sub(/^ +/,"",$0); if($0 ~ /(deepspeed|train.py)/){c++; r+=rss; v+=vsz}} END{printf "%d %d %d", c,r,v}')"
+    echo "$ts,$epoch,$mt,$ma,$st,$sf,$l1,$l5,$l15,$pc,$pr,$pv" >> "$OUT/host_telemetry.csv"
+    sleep 5
+  done
+) &
+MON=$!
+trap 'kill $MON 2>/dev/null || true' EXIT
+
+MODE=sweep \
+INCLUDE=localhost:0,1 \
+REPEATS=1 \
+STOP_ON_ERROR=1 \
+MAX_STEPS=10000 \
+SWEEP_ZERO_STAGES=0 \
+SWEEP_MICRO_BATCHES=128 \
+SWEEP_NUM_WORKERS_LIST=6 \
+SWEEP_PREFETCH_LIST=4 \
+SWEEP_LOG_EVERY=50 \
+TAIL_TIMING_POINTS=20 \
+HEARTBEAT_EVERY_SEC=30 \
+RUN_TIMEOUT_SEC=0 \
+FAILURE_DUMP_TAIL=true \
+FAIL_TAIL_LINES=120 \
+RESUME_RUNS=false \
+SWEEP_VALIDATION_EVERY=1000000 \
+SWEEP_CHECKPOINT_EVERY=1000000 \
+DATASET_ROOT=data/LibriSpeech/LibriSpeech_16k_trim \
+DATASET_MANIFEST_PATH=data/LibriSpeech/LibriSpeech_16k_trim/manifest_16k_trim.tsv \
+DATASET_USE_TRIM=false \
+DATASET_OFFLINE_TRIMMED=true \
+ENABLE_CUDA_SYNC_TIMING=false \
+TIMING_RANK_SCOPE=all \
+PRECISION_MODE=auto \
+ATTN_IMPL=flash_attention_2 \
+ENABLE_TORCH_COMPILE=false \
+TORCH_COMPILE_MODE=max-autotune \
+TORCH_COMPILE_DYNAMIC=true \
+ENABLE_LENGTH_FIXED_SLICE=false \
+ENABLE_GPU_TELEMETRY=true \
+GPU_TELEMETRY_INTERVAL_SEC=2 \
+STALL_ALERT_RATIO=2.0 \
+OUTPUT_ROOT="$OUT" \
+DRIVER_LOG_PATH="$OUT/driver.log" \
+./scripts/run_stage1_ab_bench.sh
+
+kill $MON 2>/dev/null || true
+wait $MON 2>/dev/null || true
+trap - EXIT
+echo "OUT=$OUT"
+```
+
 #### 3.4.2 C
 
 
@@ -283,7 +502,7 @@ INCLUDE=localhost:0,1 \
 
 ### 3.5 2xv100
 
-#### 3.4.1 B
+#### 3.5.1 B
 
 先统一设置一组公共参数（按 2xv100）：
 
@@ -304,6 +523,11 @@ export DATASET_OFFLINE_TRIMMED=true
 
 export PRECISION_MODE=auto
 export ATTN_IMPL=auto
+export MODEL_LOAD_DTYPE=auto
+export SPEECH_ATTN_IMPL=auto
+export TEXT_ATTN_IMPL=auto
+export ENABLE_TF32=true
+export MATMUL_PRECISION=high
 export ENABLE_CUDA_SYNC_TIMING=false
 export ENABLE_GPU_TELEMETRY=true
 export GPU_TELEMETRY_INTERVAL_SEC=2
@@ -336,6 +560,144 @@ SWEEP_ZERO_STAGES=1 SWEEP_MICRO_BATCHES=160 SWEEP_NUM_WORKERS_LIST=6 SWEEP_PREFE
 OUTPUT_ROOT=outputs/bench_v100_phaseB_diag \
 DRIVER_LOG_PATH=outputs/bench_v100_phaseB_diag/driver.log \
 ./scripts/run_stage1_ab_bench.sh
+```
+
+#### 3.5.1.1 跑一次长时 leak 诊断（4090，z0_mb128_nw6_pf4，MAX_STEPS=10000，含主机内存采样）
+
+```bash
+OUT=outputs/leak_v100_z0_$(date +%Y%m%d_%H%M%S)
+mkdir -p "$OUT"
+
+(
+  echo "timestamp,epoch_sec,mem_total_kib,mem_available_kib,swap_total_kib,swap_free_kib,load1,load5,load15,train_proc_count,train_rss_kib,train_vsz_kib" > "$OUT/host_telemetry.csv"
+  while true; do
+    ts=$(date -Is); epoch=$(date +%s)
+    eval "$(awk '
+      /^MemTotal:/ {print "mt="$2}
+      /^MemAvailable:/ {print "ma="$2}
+      /^SwapTotal:/ {print "st="$2}
+      /^SwapFree:/ {print "sf="$2}
+      END {print "mt="mt"\nma="ma"\nst="st"\nsf="sf}
+    ' /proc/meminfo)"
+    read l1 l5 l15 _ < /proc/loadavg
+    read pc pr pv <<< "$(ps -eo pid=,rss=,vsz=,args= | awk 'BEGIN{c=0;r=0;v=0} {pid=$1;rss=$2;vsz=$3;$1=$2=$3=""; sub(/^ +/,"",$0); if($0 ~ /(deepspeed|train.py)/){c++; r+=rss; v+=vsz}} END{printf "%d %d %d", c,r,v}')"
+    echo "$ts,$epoch,$mt,$ma,$st,$sf,$l1,$l5,$l15,$pc,$pr,$pv" >> "$OUT/host_telemetry.csv"
+    sleep 5
+  done
+) &
+MON=$!
+trap 'kill $MON 2>/dev/null || true' EXIT
+
+MODE=sweep \
+INCLUDE=localhost:1,3 \
+REPEATS=1 \
+STOP_ON_ERROR=1 \
+MAX_STEPS=10000 \
+SWEEP_ZERO_STAGES=0 \
+SWEEP_MICRO_BATCHES=128 \
+SWEEP_NUM_WORKERS_LIST=6 \
+SWEEP_PREFETCH_LIST=4 \
+SWEEP_LOG_EVERY=50 \
+TAIL_TIMING_POINTS=20 \
+HEARTBEAT_EVERY_SEC=30 \
+RUN_TIMEOUT_SEC=0 \
+FAILURE_DUMP_TAIL=true \
+FAIL_TAIL_LINES=120 \
+RESUME_RUNS=false \
+SWEEP_VALIDATION_EVERY=1000000 \
+SWEEP_CHECKPOINT_EVERY=1000000 \
+DATASET_ROOT=data/LibriSpeech/LibriSpeech_16k_trim \
+DATASET_MANIFEST_PATH=data/LibriSpeech/LibriSpeech_16k_trim/manifest_16k_trim.tsv \
+DATASET_USE_TRIM=false \
+DATASET_OFFLINE_TRIMMED=true \
+ENABLE_CUDA_SYNC_TIMING=false \
+TIMING_RANK_SCOPE=all \
+PRECISION_MODE=auto \
+ATTN_IMPL=auto \
+ENABLE_TORCH_COMPILE=false \
+TORCH_COMPILE_MODE=max-autotune \
+TORCH_COMPILE_DYNAMIC=true \
+ENABLE_LENGTH_FIXED_SLICE=false \
+ENABLE_GPU_TELEMETRY=true \
+GPU_TELEMETRY_INTERVAL_SEC=2 \
+STALL_ALERT_RATIO=2.0 \
+OUTPUT_ROOT="$OUT" \
+DRIVER_LOG_PATH="$OUT/driver.log" \
+./scripts/run_stage1_ab_bench.sh
+
+kill $MON 2>/dev/null || true
+wait $MON 2>/dev/null || true
+trap - EXIT
+echo "OUT=$OUT"
+```
+
+#### 3.5.1.1 跑一次长时 leak 诊断（4090，z1_mb128_nw6_pf4，MAX_STEPS=10000，含主机内存采样）
+
+```bash
+OUT=outputs/leak_v100_z1_$(date +%Y%m%d_%H%M%S)
+mkdir -p "$OUT"
+
+(
+  echo "timestamp,epoch_sec,mem_total_kib,mem_available_kib,swap_total_kib,swap_free_kib,load1,load5,load15,train_proc_count,train_rss_kib,train_vsz_kib" > "$OUT/host_telemetry.csv"
+  while true; do
+    ts=$(date -Is); epoch=$(date +%s)
+    eval "$(awk '
+      /^MemTotal:/ {print "mt="$2}
+      /^MemAvailable:/ {print "ma="$2}
+      /^SwapTotal:/ {print "st="$2}
+      /^SwapFree:/ {print "sf="$2}
+      END {print "mt="mt"\nma="ma"\nst="st"\nsf="sf}
+    ' /proc/meminfo)"
+    read l1 l5 l15 _ < /proc/loadavg
+    read pc pr pv <<< "$(ps -eo pid=,rss=,vsz=,args= | awk 'BEGIN{c=0;r=0;v=0} {pid=$1;rss=$2;vsz=$3;$1=$2=$3=""; sub(/^ +/,"",$0); if($0 ~ /(deepspeed|train.py)/){c++; r+=rss; v+=vsz}} END{printf "%d %d %d", c,r,v}')"
+    echo "$ts,$epoch,$mt,$ma,$st,$sf,$l1,$l5,$l15,$pc,$pr,$pv" >> "$OUT/host_telemetry.csv"
+    sleep 5
+  done
+) &
+MON=$!
+trap 'kill $MON 2>/dev/null || true' EXIT
+
+MODE=sweep \
+INCLUDE=localhost:1,3 \
+REPEATS=1 \
+STOP_ON_ERROR=1 \
+MAX_STEPS=10000 \
+SWEEP_ZERO_STAGES=1 \
+SWEEP_MICRO_BATCHES=128 \
+SWEEP_NUM_WORKERS_LIST=6 \
+SWEEP_PREFETCH_LIST=4 \
+SWEEP_LOG_EVERY=50 \
+TAIL_TIMING_POINTS=20 \
+HEARTBEAT_EVERY_SEC=30 \
+RUN_TIMEOUT_SEC=0 \
+FAILURE_DUMP_TAIL=true \
+FAIL_TAIL_LINES=120 \
+RESUME_RUNS=false \
+SWEEP_VALIDATION_EVERY=1000000 \
+SWEEP_CHECKPOINT_EVERY=1000000 \
+DATASET_ROOT=data/LibriSpeech/LibriSpeech_16k_trim \
+DATASET_MANIFEST_PATH=data/LibriSpeech/LibriSpeech_16k_trim/manifest_16k_trim.tsv \
+DATASET_USE_TRIM=false \
+DATASET_OFFLINE_TRIMMED=true \
+ENABLE_CUDA_SYNC_TIMING=false \
+TIMING_RANK_SCOPE=all \
+PRECISION_MODE=auto \
+ATTN_IMPL=auto \
+ENABLE_TORCH_COMPILE=false \
+TORCH_COMPILE_MODE=max-autotune \
+TORCH_COMPILE_DYNAMIC=true \
+ENABLE_LENGTH_FIXED_SLICE=false \
+ENABLE_GPU_TELEMETRY=true \
+GPU_TELEMETRY_INTERVAL_SEC=2 \
+STALL_ALERT_RATIO=2.0 \
+OUTPUT_ROOT="$OUT" \
+DRIVER_LOG_PATH="$OUT/driver.log" \
+./scripts/run_stage1_ab_bench.sh
+
+kill $MON 2>/dev/null || true
+wait $MON 2>/dev/null || true
+trap - EXIT
+echo "OUT=$OUT"
 ```
 
 Notes:

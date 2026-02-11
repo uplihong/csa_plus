@@ -87,7 +87,10 @@ def main():
     for row in manifest_rows:
         mode = row.get("mode", "")
         group = row.get("group", "")
-        repeat = int(row.get("repeat", "0"))
+        try:
+            repeat = int(row.get("repeat", "0"))
+        except (TypeError, ValueError):
+            repeat = 0
         status = row.get("status", "")
         train_log = Path(row.get("train_log", ""))
         launcher_log = Path(row.get("launcher_log", ""))
@@ -214,8 +217,12 @@ def main():
             "timing_rank_scope": row.get("timing_rank_scope", ""),
             "precision_mode_req": row.get("precision_mode_req", ""),
             "precision_mode_effective": row.get("precision_mode_effective", ""),
+            "model_load_dtype_effective": row.get("model_load_dtype_effective", ""),
             "attn_impl_effective": row.get("attn_impl_effective", ""),
+            "speech_attn_impl_effective": row.get("speech_attn_impl_effective", row.get("attn_impl_effective", "")),
+            "text_attn_impl_effective": row.get("text_attn_impl_effective", row.get("attn_impl_effective", "")),
             "torch_compile_enabled": row.get("torch_compile_enabled", ""),
+            "tf32_enabled": row.get("tf32_enabled", ""),
             "gpu_name": row.get("gpu_name", ""),
             "gpu_cc": row.get("gpu_cc", ""),
             "git_commit_hash": row.get("git_commit_hash", ""),
@@ -343,8 +350,12 @@ def main():
                 "enable_cuda_sync_timing": unique_or_mixed(rows, "enable_cuda_sync_timing"),
                 "timing_rank_scope": unique_or_mixed(rows, "timing_rank_scope"),
                 "precision_mode_effective": unique_or_mixed(rows, "precision_mode_effective"),
+                "model_load_dtype_effective": unique_or_mixed(rows, "model_load_dtype_effective"),
                 "attn_impl_effective": unique_or_mixed(rows, "attn_impl_effective"),
+                "speech_attn_impl_effective": unique_or_mixed(rows, "speech_attn_impl_effective"),
+                "text_attn_impl_effective": unique_or_mixed(rows, "text_attn_impl_effective"),
                 "torch_compile_enabled": unique_or_mixed(rows, "torch_compile_enabled"),
+                "tf32_enabled": unique_or_mixed(rows, "tf32_enabled"),
                 "gpu_name": unique_or_mixed(rows, "gpu_name"),
                 "gpu_cc": unique_or_mixed(rows, "gpu_cc"),
                 "git_commit_short": unique_or_mixed(rows, "git_commit_short"),
@@ -431,8 +442,12 @@ def main():
             "num_workers": best_group["num_workers"],
             "prefetch_factor": best_group["prefetch_factor"],
             "precision_mode_effective": best_group["precision_mode_effective"],
+            "model_load_dtype_effective": best_group["model_load_dtype_effective"],
             "attn_impl_effective": best_group["attn_impl_effective"],
+            "speech_attn_impl_effective": best_group["speech_attn_impl_effective"],
+            "text_attn_impl_effective": best_group["text_attn_impl_effective"],
             "torch_compile_enabled": best_group["torch_compile_enabled"],
+            "tf32_enabled": best_group["tf32_enabled"],
             "gpu_name": best_group["gpu_name"],
             "gpu_cc": best_group["gpu_cc"],
             "git_commit_short": best_group["git_commit_short"],
@@ -477,8 +492,12 @@ def main():
             env_line("BEST_NUM_WORKERS", best_payload.get("num_workers", "")),
             env_line("BEST_PREFETCH_FACTOR", best_payload.get("prefetch_factor", "")),
             env_line("BEST_PRECISION_MODE_EFFECTIVE", best_payload.get("precision_mode_effective", "")),
+            env_line("BEST_MODEL_LOAD_DTYPE_EFFECTIVE", best_payload.get("model_load_dtype_effective", "")),
             env_line("BEST_ATTN_IMPL_EFFECTIVE", best_payload.get("attn_impl_effective", "")),
+            env_line("BEST_SPEECH_ATTN_IMPL_EFFECTIVE", best_payload.get("speech_attn_impl_effective", "")),
+            env_line("BEST_TEXT_ATTN_IMPL_EFFECTIVE", best_payload.get("text_attn_impl_effective", "")),
             env_line("BEST_TORCH_COMPILE_ENABLED", best_payload.get("torch_compile_enabled", "")),
+            env_line("BEST_TF32_ENABLED", best_payload.get("tf32_enabled", "")),
             env_line("BEST_GPU_NAME", best_payload.get("gpu_name", "")),
             env_line("BEST_GPU_CC", best_payload.get("gpu_cc", "")),
             env_line("BEST_GIT_COMMIT_SHORT", best_payload.get("git_commit_short", "")),
@@ -503,8 +522,11 @@ def main():
             f"deepspeed_config_yaml.train_micro_batch_size_per_gpu={best_payload.get('micro_batch', '')}",
             f"++train.data.num_workers={best_payload.get('num_workers', '')}",
             f"++train.data.prefetch_factor={best_payload.get('prefetch_factor', '')}",
-            f"++model.speech_encoder.attn_implementation={best_payload.get('attn_impl_effective', '')}",
-            f"++model.text_encoder.attn_implementation={best_payload.get('attn_impl_effective', '')}",
+            f"++model.speech_encoder.attn_implementation={best_payload.get('speech_attn_impl_effective', '')}",
+            f"++model.text_encoder.attn_implementation={best_payload.get('text_attn_impl_effective', '')}",
+            f"++model.speech_encoder.torch_dtype={best_payload.get('model_load_dtype_effective', '')}",
+            f"++model.text_encoder.torch_dtype={best_payload.get('model_load_dtype_effective', '')}",
+            f"++train.enable_tf32={best_payload.get('tf32_enabled', '')}",
         ]
         precision_mode = best_payload.get("precision_mode_effective", "")
         if precision_mode == "bf16":
@@ -530,8 +552,12 @@ def main():
         lines.append(f"- zero_stage: `{best_payload['zero_stage']}`")
         lines.append(f"- micro_batch: `{best_payload['micro_batch']}`")
         lines.append(f"- precision_mode_effective: `{best_payload['precision_mode_effective']}`")
+        lines.append(f"- model_load_dtype_effective: `{best_payload['model_load_dtype_effective']}`")
         lines.append(f"- attn_impl_effective: `{best_payload['attn_impl_effective']}`")
+        lines.append(f"- speech_attn_impl_effective: `{best_payload['speech_attn_impl_effective']}`")
+        lines.append(f"- text_attn_impl_effective: `{best_payload['text_attn_impl_effective']}`")
         lines.append(f"- torch_compile_enabled: `{best_payload['torch_compile_enabled']}`")
+        lines.append(f"- tf32_enabled: `{best_payload['tf32_enabled']}`")
         lines.append(f"- gpu_name: `{best_payload['gpu_name']}`")
         lines.append(f"- gpu_cc: `{best_payload['gpu_cc']}`")
         lines.append(f"- git_commit_short: `{best_payload['git_commit_short']}`")
@@ -557,14 +583,14 @@ def main():
     lines.append("## Group Summary")
     lines.append("")
     if ranked_rows:
-        lines.append("| rank_iter | rank_stability | rank_balanced | group | runs | zero_stage | micro_batch | precision | attn_impl | compile | num_workers | prefetch | tail_mean_iter_p50_ms_mean | tail_mean_iter_p90_ms_mean | stability_score | unstable_run_ratio | tail_steps_per_sec_mean | tail_samples_per_sec_mean | speedup_vs_baseline |")
-        lines.append("|---:|---:|---:|---|---:|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|")
+        lines.append("| rank_iter | rank_stability | rank_balanced | group | runs | zero_stage | micro_batch | precision | model_dtype | speech_attn | text_attn | compile | tf32 | num_workers | prefetch | tail_mean_iter_p50_ms_mean | tail_mean_iter_p90_ms_mean | stability_score | unstable_run_ratio | tail_steps_per_sec_mean | tail_samples_per_sec_mean | speedup_vs_baseline |")
+        lines.append("|---:|---:|---:|---|---:|---|---|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|")
         for row in ranked_rows:
             sample_speed = "nan" if math.isnan(row["tail_samples_per_sec_mean"]) else f"{row['tail_samples_per_sec_mean']:.4f}"
             speedup = "nan" if math.isnan(row["speedup_vs_baseline"]) else f"{row['speedup_vs_baseline']:.4f}"
             stability = "nan" if math.isnan(row["stability_score"]) else f"{row['stability_score']:.4f}"
             lines.append(
-                f"| {row['rank_by_iter_p50']} | {row['rank_by_stability']} | {row['rank_balanced']} | {row['group']} | {row['runs']} | {row['zero_stage']} | {row['micro_batch']} | {row['precision_mode_effective']} | {row['attn_impl_effective']} | {row['torch_compile_enabled']} | {row['num_workers']} | {row['prefetch_factor']} | "
+                f"| {row['rank_by_iter_p50']} | {row['rank_by_stability']} | {row['rank_balanced']} | {row['group']} | {row['runs']} | {row['zero_stage']} | {row['micro_batch']} | {row['precision_mode_effective']} | {row['model_load_dtype_effective']} | {row['speech_attn_impl_effective']} | {row['text_attn_impl_effective']} | {row['torch_compile_enabled']} | {row['tf32_enabled']} | {row['num_workers']} | {row['prefetch_factor']} | "
                 f"{row['tail_mean_iter_p50_ms_mean']:.4f} | {row['tail_mean_iter_p90_ms_mean']:.4f} | {stability} | {row['unstable_run_ratio']:.4f} | {row['tail_steps_per_sec_mean']:.4f} | {sample_speed} | {speedup} |"
             )
     else:
