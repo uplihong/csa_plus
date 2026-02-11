@@ -286,6 +286,29 @@ INCLUDE=localhost:0,1 \
   --max-iter-p50-cv 0.05
 ```
 
+#### 3.4.1.0 4090 最小矩阵复验（随机顺序 + host telemetry + 自动 Go/No-Go 报告）
+
+```bash
+SUITE_ROOT=outputs/bench_4090_reval_$(date +%Y%m%d_%H%M%S) \
+INCLUDE=localhost:0,1 \
+ROUNDS=3 \
+MAX_STEPS=1400 \
+MICRO_BATCH=128 \
+NUM_WORKERS=6 \
+PREFETCH_FACTOR=4 \
+PRECISION_MODE=auto \
+MODEL_LOAD_DTYPE=auto \
+ENABLE_TF32=true \
+MATMUL_PRECISION=high \
+./scripts/run_4090_min_matrix.sh
+```
+
+关键产物：
+- `run_order.tsv`：每轮随机执行顺序与状态。
+- `<case>_r<round>/host_telemetry.csv`：CPU/RSS/load 采样。
+- `suite_case_summary.csv`：按 case 聚合指标（吞吐、稳定性、功耗、step-span）。
+- `suite_report.md`：自动 Go/No-Go 结论与下一步建议。
+
 #### 3.4.1.1 跑一次长时 leak 诊断（4090，z0_mb128_nw6_pf4，MAX_STEPS=10000，含主机内存采样）
 
 ```bash
@@ -723,6 +746,29 @@ Outputs:
 - `outputs/.../*/gpu_telemetry.csv` (when telemetry is enabled)
 - `outputs/.../best_config.json`
 - `outputs/.../summary.md`
+
+#### 3.4.1.0 v100 最小矩阵复验（随机顺序 + host telemetry + 自动 Go/No-Go 报告）
+
+```bash
+SUITE_ROOT=outputs/bench_v100_reval_$(date +%Y%m%d_%H%M%S) \
+INCLUDE=localhost:1,3 \
+ROUNDS=3 \
+MAX_STEPS=1000 \
+MICRO_BATCH=128 \
+NUM_WORKERS=6 \
+PREFETCH_FACTOR=4 \
+PRECISION_MODE=auto \
+MODEL_LOAD_DTYPE=auto \
+ENABLE_TF32=true \
+MATMUL_PRECISION=high \
+./scripts/run_4090_min_matrix.sh
+```
+
+关键产物：
+- `run_order.tsv`：每轮随机执行顺序与状态。
+- `<case>_r<round>/host_telemetry.csv`：CPU/RSS/load 采样。
+- `suite_case_summary.csv`：按 case 聚合指标（吞吐、稳定性、功耗、step-span）。
+- `suite_report.md`：自动 Go/No-Go 结论与下一步建议。
 
 ### Recommended Phase Schedule (throughput-first)
 
