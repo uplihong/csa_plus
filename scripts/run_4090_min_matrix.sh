@@ -286,9 +286,10 @@ main() {
   require_pos_int "STEP_SPAN_TARGET" "${STEP_SPAN_TARGET}"
 
   mkdir -p "${SUITE_ROOT}"
-  {
-    echo "round\torder\tcase\tzero_stage\tspeech_attn\ttext_attn\tstatus\tstart_ts\tend_ts\tduration_sec\toutput_root\thost_telemetry_csv"
-  } > "${SUITE_ROOT}/run_order.tsv"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "round" "order" "case" "zero_stage" "speech_attn" "text_attn" \
+    "status" "start_ts" "end_ts" "duration_sec" "output_root" "host_telemetry_csv" \
+    > "${SUITE_ROOT}/run_order.tsv"
 
   {
     echo "SUITE_ROOT=${SUITE_ROOT}"

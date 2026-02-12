@@ -216,8 +216,8 @@ def summarize_host(case_root: Path) -> Dict[str, float]:
     load1 = [to_float(r.get("load1")) for r in rows]
     proc_count = [to_float(r.get("train_proc_count")) for r in rows]
 
-    # Restrict slope evaluation to intervals where training processes are present.
-    eval_idx = [i for i, c in enumerate(proc_count) if not math.isnan(c) and c >= 2]
+    # Restrict evaluation to the steady training interval and drop warmup tail.
+    eval_idx = [i for i, c in enumerate(proc_count) if not math.isnan(c) and c >= 10]
     if eval_idx:
         lo, hi = min(eval_idx), max(eval_idx)
         ts_eval = ts[lo : hi + 1]
@@ -225,6 +225,13 @@ def summarize_host(case_root: Path) -> Dict[str, float]:
     else:
         ts_eval = ts
         rss_eval = rss_mib
+
+    pairs = [(x, y) for x, y in zip(ts_eval, rss_eval) if not math.isnan(x) and not math.isnan(y)]
+    if len(pairs) >= 2:
+        cut = min(len(pairs) - 1, max(1, int(len(pairs) * 0.2)))
+        pairs = pairs[cut:]
+        ts_eval = [x for x, _ in pairs]
+        rss_eval = [y for _, y in pairs]
 
     slope = slope_per_min(ts_eval, rss_eval)
     if rss_eval:

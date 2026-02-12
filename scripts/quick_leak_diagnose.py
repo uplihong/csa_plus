@@ -67,6 +67,21 @@ def head_tail_mean(values: List[float], ratio: float = 0.1) -> Tuple[float, floa
     return mean(vals[:n]), mean(vals[-n:])
 
 
+def trim_warmup_pairs(xs: Iterable[float], ys: Iterable[float], warmup_ratio: float = 0.2) -> List[Tuple[float, float]]:
+    pairs = [(x, y) for x, y in zip(xs, ys) if not math.isnan(x) and not math.isnan(y)]
+    if len(pairs) < 2:
+        return pairs
+    cut = min(len(pairs) - 1, max(1, int(len(pairs) * warmup_ratio)))
+    return pairs[cut:]
+
+
+def tail_drift(values: Iterable[float], ratio: float = 0.1) -> float:
+    head, tail = head_tail_mean(list(values), ratio=ratio)
+    if math.isnan(head) or math.isnan(tail):
+        return math.nan
+    return tail - head
+
+
 def read_tsv(path: Path) -> List[Dict[str, str]]:
     with path.open("r", encoding="utf-8", newline="") as f:
         return list(csv.DictReader(f, delimiter="\t"))
@@ -84,7 +99,10 @@ def summarize_gpu(run_dir: Path) -> Dict[str, float]:
     rows = read_csv(csv_path)
     by_gpu: Dict[int, Dict[str, List[float]]] = {}
     for row in rows:
-        gpu_idx = int(to_float(row.get("gpu_index")))
+        gpu_idx_f = to_float(row.get("gpu_index"))
+        if math.isnan(gpu_idx_f):
+            continue
+        gpu_idx = int(gpu_idx_f)
         by_gpu.setdefault(gpu_idx, {"ts": [], "mem": [], "util": [], "power": []})
         by_gpu[gpu_idx]["ts"].append(to_float(row.get("epoch_sec")))
         by_gpu[gpu_idx]["mem"].append(to_float(row.get("mem_used_mib")))
@@ -100,15 +118,16 @@ def summarize_gpu(run_dir: Path) -> Dict[str, float]:
         mem = by_gpu[idx]["mem"]
         util = by_gpu[idx]["util"]
         power = by_gpu[idx]["power"]
-        if len(mem) < 2:
+        stable_pairs = trim_warmup_pairs(ts, mem, warmup_ratio=0.2)
+        if len(stable_pairs) < 2:
             continue
-        cut = max(1, int(len(mem) * 0.2))
-        slope_tail = slope_per_unit(ts[cut:], mem[cut:]) * 60.0
-        head, tail = head_tail_mean(mem, ratio=0.1)
+        ts_stable = [x for x, _ in stable_pairs]
+        mem_stable = [y for _, y in stable_pairs]
+        slope_tail = slope_per_unit(ts_stable, mem_stable) * 60.0
         gpu_tail_slopes.append(slope_tail)
-        gpu_tail_drifts.append(tail - head)
-        gpu_util_means.append(mean(util))
-        gpu_power_means.append(mean(power))
+        gpu_tail_drifts.append(tail_drift(mem_stable, ratio=0.1))
+        gpu_util_means.append(mean(clean(util)))
+        gpu_power_means.append(mean(clean(power)))
 
     return {
         "gpu_count": float(len(by_gpu)),
@@ -140,13 +159,20 @@ def summarize_host(root: Path) -> Dict[str, float]:
         ts_eval = ts
         rss_eval = rss_mib
 
-    slope = slope_per_unit(ts_eval, rss_eval) * 60.0
-    head, tail = head_tail_mean(rss_eval, ratio=0.1)
+    stable_pairs = trim_warmup_pairs(ts_eval, rss_eval, warmup_ratio=0.2)
+    if stable_pairs:
+        ts_stable = [x for x, _ in stable_pairs]
+        rss_stable = [y for _, y in stable_pairs]
+    else:
+        ts_stable = ts_eval
+        rss_stable = rss_eval
+
+    slope = slope_per_unit(ts_stable, rss_stable) * 60.0
     return {
         "host_rss_mean_mib": mean(rss_mib),
         "host_rss_p90_mib": percentile(rss_mib, 0.9),
         "host_rss_tail_slope_mib_min": slope,
-        "host_rss_tail_drift_mib": tail - head,
+        "host_rss_tail_drift_mib": tail_drift(rss_stable, ratio=0.1),
         "host_proc_count_p50": percentile(proc_count, 0.5),
         "host_proc_count_p90": percentile(proc_count, 0.9),
     }
@@ -157,12 +183,14 @@ def summarize_timing(root: Path) -> Dict[str, float]:
     if not csv_path.exists():
         return {}
     rows = read_csv(csv_path)
-    iter_ms = [to_float(r.get("iter_ms_p50")) for r in rows]
+    iter_ms = clean([to_float(r.get("iter_ms_p50")) for r in rows])
     if not iter_ms:
         return {}
-    n = max(1, int(len(iter_ms) * 0.1))
-    head = mean(iter_ms[:n])
-    tail = mean(iter_ms[-n:])
+    cut = min(len(iter_ms) - 1, max(1, int(len(iter_ms) * 0.2))) if len(iter_ms) > 1 else 0
+    iter_stable = iter_ms[cut:] if cut > 0 else iter_ms
+    n = max(1, int(len(iter_stable) * 0.1))
+    head = mean(iter_stable[:n])
+    tail = mean(iter_stable[-n:])
     drift_pct = math.nan
     if not math.isnan(head) and head > 0:
         drift_pct = (tail / head - 1.0) * 100.0
