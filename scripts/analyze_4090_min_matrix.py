@@ -41,6 +41,21 @@ def safe_max(values: Iterable[float]) -> float:
     return max(vals) if vals else math.nan
 
 
+def safe_percentile(values: Iterable[float], q: float) -> float:
+    vals = sorted(v for v in values if not math.isnan(v))
+    if not vals:
+        return math.nan
+    if len(vals) == 1:
+        return vals[0]
+    pos = (len(vals) - 1) * q
+    left = int(math.floor(pos))
+    right = int(math.ceil(pos))
+    if left == right:
+        return vals[left]
+    frac = pos - left
+    return vals[left] * (1.0 - frac) + vals[right] * frac
+
+
 def safe_cv(values: Iterable[float]) -> float:
     vals = [v for v in values if not math.isnan(v)]
     if not vals:
@@ -166,38 +181,97 @@ def summarize_gpu(run_dir: Path) -> Dict[str, float]:
             "gpu_total_power_max_w": math.nan,
             "gpu_util_gap_mean_pct": math.nan,
             "gpu_util_gap_max_pct": math.nan,
+            "gpu_count_detected": math.nan,
+            "extreme_imbalance_ratio_90_10": math.nan,
         }
 
     rows = read_csv(csv_path)
     by_ts: Dict[str, Dict[int, Tuple[float, float]]] = {}
+    seen_gpu_ids = set()
     for row in rows:
-        ts = row.get("epoch_sec", "")
-        idx = int(to_float(row.get("gpu_index")))
+        ts = str(row.get("epoch_sec", "")).strip()
+        idx_f = to_float(row.get("gpu_index"))
+        if ts == "" or math.isnan(idx_f):
+            continue
+        idx = int(idx_f)
         util = to_float(row.get("util_gpu_pct"))
         power = to_float(row.get("power_w"))
-        if ts == "" or idx < 0:
+        if idx < 0:
             continue
+        seen_gpu_ids.add(idx)
         by_ts.setdefault(ts, {})[idx] = (util, power)
 
+    gpu_count = len(seen_gpu_ids)
     total_powers = []
     util_gaps = []
+    imbalance_points = 0
+    util_points = 0
     for _, item in by_ts.items():
-        if len(item) < 2:
-            continue
-        sorted_ids = sorted(item.keys())
-        id0, id1 = sorted_ids[0], sorted_ids[1]
-        u0, p0 = item[id0]
-        u1, p1 = item[id1]
-        if not math.isnan(p0) and not math.isnan(p1):
-            total_powers.append(p0 + p1)
-        if not math.isnan(u0) and not math.isnan(u1):
-            util_gaps.append(abs(u0 - u1))
+        powers = [p for _, p in item.values() if not math.isnan(p)]
+        utils = [u for u, _ in item.values() if not math.isnan(u)]
+
+        if gpu_count <= 1:
+            if powers:
+                total_powers.append(sum(powers))
+        elif len(powers) == gpu_count:
+            total_powers.append(sum(powers))
+
+        if len(utils) >= 2:
+            max_u = max(utils)
+            min_u = min(utils)
+            util_gaps.append(max_u - min_u)
+            util_points += 1
+            if max_u >= 90.0 and min_u <= 10.0:
+                imbalance_points += 1
 
     return {
         "gpu_total_power_mean_w": safe_mean(total_powers),
         "gpu_total_power_max_w": safe_max(total_powers),
         "gpu_util_gap_mean_pct": safe_mean(util_gaps),
         "gpu_util_gap_max_pct": safe_max(util_gaps),
+        "gpu_count_detected": float(gpu_count) if gpu_count > 0 else math.nan,
+        "extreme_imbalance_ratio_90_10": (imbalance_points / util_points) if util_points > 0 else math.nan,
+    }
+
+
+def summarize_rank_spreads(train_log: Path) -> Dict[str, float]:
+    if not train_log.exists():
+        return {
+            "rank_iter_spread_p90_ms": math.nan,
+            "rank_step_spread_p90_ms": math.nan,
+        }
+
+    pattern = re.compile(
+        r"TimingRank step=([0-9]+)\s+rank=([0-9]+)\s+loss=[^ ]+\s+data_wait=[^ ]+\s+preprocess=[^ ]+\s+fwd=[^ ]+\s+bwd=[^ ]+\s+step=([0-9]+(?:\.[0-9]+)?)\s+iter=([0-9]+(?:\.[0-9]+)?)"
+    )
+
+    iter_by_step: Dict[int, List[float]] = {}
+    step_by_step: Dict[int, List[float]] = {}
+    with train_log.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            m = pattern.search(line)
+            if not m:
+                continue
+            step = int(m.group(1))
+            step_ms = float(m.group(3))
+            iter_ms = float(m.group(4))
+            step_by_step.setdefault(step, []).append(step_ms)
+            iter_by_step.setdefault(step, []).append(iter_ms)
+
+    iter_spreads = []
+    step_spreads = []
+    for step, values in iter_by_step.items():
+        valid = [v for v in values if not math.isnan(v)]
+        if len(valid) >= 2:
+            iter_spreads.append(max(valid) - min(valid))
+    for step, values in step_by_step.items():
+        valid = [v for v in values if not math.isnan(v)]
+        if len(valid) >= 2:
+            step_spreads.append(max(valid) - min(valid))
+
+    return {
+        "rank_iter_spread_p90_ms": safe_percentile(iter_spreads, 0.9),
+        "rank_step_spread_p90_ms": safe_percentile(step_spreads, 0.9),
     }
 
 
@@ -287,6 +361,13 @@ def load_run_record(case_name: str, round_idx: int, case_root: Path, target_step
     host_stats = summarize_host(case_root)
     span_stats = parse_step_spans(train_log, target_step)
     log_flags = scan_log_flags(train_log, launcher_log)
+    rank_spreads = summarize_rank_spreads(train_log)
+
+    tail_samples_per_sec = to_float(per_run.get("tail_samples_per_sec"))
+    gpu_count_detected = to_float(gpu_stats.get("gpu_count_detected", math.nan))
+    samples_per_sec_per_gpu = math.nan
+    if not math.isnan(tail_samples_per_sec) and tail_samples_per_sec > 0 and not math.isnan(gpu_count_detected) and gpu_count_detected > 0:
+        samples_per_sec_per_gpu = tail_samples_per_sec / gpu_count_detected
 
     record: Dict[str, object] = {
         "case": case_name,
@@ -300,7 +381,8 @@ def load_run_record(case_name: str, round_idx: int, case_root: Path, target_step
         "text_attn_impl_effective": manifest.get("text_attn_impl_effective", manifest.get("attn_impl_effective", "")),
         "model_load_dtype_effective": manifest.get("model_load_dtype_effective", ""),
         "tf32_enabled": manifest.get("tf32_enabled", ""),
-        "tail_samples_per_sec": to_float(per_run.get("tail_samples_per_sec")),
+        "tail_samples_per_sec": tail_samples_per_sec,
+        "samples_per_sec_per_gpu": samples_per_sec_per_gpu,
         "tail_mean_iter_p50_ms": to_float(per_run.get("tail_mean_iter_p50_ms")),
         "last_iter_p50_ms": to_float(per_run.get("last_iter_p50_ms")),
         "iter_p90_over_p50": to_float(per_run.get("iter_p90_over_p50", manifest.get("iter_p90_over_p50"))),
@@ -309,6 +391,10 @@ def load_run_record(case_name: str, round_idx: int, case_root: Path, target_step
         "gpu_total_power_max_w": gpu_stats["gpu_total_power_max_w"],
         "gpu_util_gap_mean_pct": gpu_stats["gpu_util_gap_mean_pct"],
         "gpu_util_gap_max_pct": gpu_stats["gpu_util_gap_max_pct"],
+        "gpu_count_detected": gpu_stats["gpu_count_detected"],
+        "extreme_imbalance_ratio_90_10": gpu_stats["extreme_imbalance_ratio_90_10"],
+        "rank_iter_spread_p90_ms": rank_spreads["rank_iter_spread_p90_ms"],
+        "rank_step_spread_p90_ms": rank_spreads["rank_step_spread_p90_ms"],
         "host_rss_tail_slope_mib_min": host_stats["host_rss_tail_slope_mib_min"],
         "host_rss_tail_drift_mib": host_stats["host_rss_tail_drift_mib"],
         "host_load1_mean": host_stats["host_load1_mean"],
@@ -342,6 +428,7 @@ def aggregate_case(case_name: str, runs: List[Dict[str, object]]) -> Dict[str, o
         {
             "tail_samples_per_sec_median": safe_median(vals("tail_samples_per_sec")),
             "tail_samples_per_sec_mean": safe_mean(vals("tail_samples_per_sec")),
+            "samples_per_sec_per_gpu": safe_median(vals("samples_per_sec_per_gpu")),
             "tail_mean_iter_p50_ms_median": safe_median(vals("tail_mean_iter_p50_ms")),
             "tail_mean_iter_p50_ms_mean": safe_mean(vals("tail_mean_iter_p50_ms")),
             "iter_p90_over_p50_median": safe_median(vals("iter_p90_over_p50")),
@@ -349,6 +436,10 @@ def aggregate_case(case_name: str, runs: List[Dict[str, object]]) -> Dict[str, o
             "iter_p50_cv": safe_cv(vals("tail_mean_iter_p50_ms")),
             "gpu_total_power_mean_w_mean": safe_mean(vals("gpu_total_power_mean_w")),
             "gpu_util_gap_mean_pct_mean": safe_mean(vals("gpu_util_gap_mean_pct")),
+            "gpu_count_detected": safe_median(vals("gpu_count_detected")),
+            "rank_iter_spread_p90_ms": safe_median(vals("rank_iter_spread_p90_ms")),
+            "rank_step_spread_p90_ms": safe_median(vals("rank_step_spread_p90_ms")),
+            "extreme_imbalance_ratio_90_10": safe_median(vals("extreme_imbalance_ratio_90_10")),
             "host_rss_tail_slope_mib_min_median": safe_median(vals("host_rss_tail_slope_mib_min")),
             "step_span_0_target_sec_median": safe_median(vals("step_span_0_target_sec")),
             "step_span_0_last_sec_median": safe_median(vals("step_span_0_last_sec")),
@@ -475,8 +566,8 @@ def write_markdown(
 
     lines.append("## Case Summary")
     lines.append("")
-    lines.append("| case | runs_success/runs_total | tail_samples_median | tail_iter_p50_median_ms | iter_p90/p50_median | step_p90/p50_median | iter_p50_cv | gpu_total_power_mean_w | gpu_util_gap_mean_pct | host_rss_tail_slope_mib_min | step_span_0_target_median_sec | dtype_warn | oom | traceback |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("| case | runs_success/runs_total | tail_samples_median | samples_per_sec_per_gpu | tail_iter_p50_median_ms | iter_p90/p50_median | step_p90/p50_median | iter_p50_cv | gpu_count_detected | rank_iter_spread_p90_ms | rank_step_spread_p90_ms | extreme_imbalance_ratio_90_10 | gpu_total_power_mean_w | gpu_util_gap_mean_pct | host_rss_tail_slope_mib_min | step_span_0_target_median_sec | dtype_warn | oom | traceback |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     by_case = {x["case"]: x for x in case_summaries}
     for case in CASE_ORDER:
         row = by_case.get(case)
@@ -485,10 +576,15 @@ def write_markdown(
         lines.append(
             f"| {case} | {row['runs_success']}/{row['runs_total']} | "
             f"{format_num(row['tail_samples_per_sec_median'], 3)} | "
+            f"{format_num(row['samples_per_sec_per_gpu'], 3)} | "
             f"{format_num(row['tail_mean_iter_p50_ms_median'], 3)} | "
             f"{format_num(row['iter_p90_over_p50_median'], 3)} | "
             f"{format_num(row['step_p90_over_p50_median'], 3)} | "
             f"{format_num(row['iter_p50_cv'], 4)} | "
+            f"{format_num(row['gpu_count_detected'], 2)} | "
+            f"{format_num(row['rank_iter_spread_p90_ms'], 3)} | "
+            f"{format_num(row['rank_step_spread_p90_ms'], 3)} | "
+            f"{format_num(row['extreme_imbalance_ratio_90_10'], 4)} | "
             f"{format_num(row['gpu_total_power_mean_w_mean'], 2)} | "
             f"{format_num(row['gpu_util_gap_mean_pct_mean'], 2)} | "
             f"{format_num(row['host_rss_tail_slope_mib_min_median'], 3)} | "

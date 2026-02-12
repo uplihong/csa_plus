@@ -106,7 +106,7 @@ SWEEP_PREFETCH_LIST="${SWEEP_PREFETCH_LIST:-}"
 mkdir -p "${OUTPUT_ROOT}"
 MANIFEST_PATH="${OUTPUT_ROOT}/run_manifest.tsv"
 
-MANIFEST_HEADER=$'mode\tgroup\trepeat\tstatus\texit_code\tduration_sec\tlast_step\tlast_iter_ms_p50\titer_p90_over_p50\tdata_p90_over_p50\tstep_p90_over_p50\tunstable_run_flag\tport\trun_dir\tlauncher_log\ttrain_log\tzero_stage\tmicro_batch\tworld_size\tglobal_batch\tdeterministic\tcudnn_benchmark\twall_clock_breakdown\tlog_every_steps\tvalidation_every_steps\tcheckpoint_every_steps\tnum_workers\tprefetch_factor\tdataset_manifest_path\tdataset_use_trim\tdataset_offline_trimmed\tenable_cuda_sync_timing\ttiming_rank_scope\tprecision_mode_req\tprecision_mode_effective\tmodel_load_dtype_effective\tattn_impl_effective\tspeech_attn_impl_effective\ttext_attn_impl_effective\ttorch_compile_enabled\ttf32_enabled\tgpu_name\tgpu_cc\tgit_commit_hash\tgit_commit_short\tgit_branch\tgit_dirty\tgpu_telemetry_rows\tgpu_telemetry_empty_flag'
+MANIFEST_HEADER=$'mode\tgroup\trepeat\tstatus\texit_code\tduration_sec\tlast_step\tlast_iter_ms_p50\titer_p90_over_p50\tdata_p90_over_p50\tstep_p90_over_p50\tunstable_run_flag\tport\trun_dir\tlauncher_log\ttrain_log\tzero_stage\tmicro_batch\tworld_size\tglobal_batch\tdeterministic\tcudnn_benchmark\twall_clock_breakdown\tlog_every_steps\tvalidation_every_steps\tcheckpoint_every_steps\tnum_workers\tprefetch_factor\tdataset_manifest_path\tdataset_use_trim\tdataset_offline_trimmed\tenable_cuda_sync_timing\ttiming_rank_scope\tprecision_mode_req\tprecision_mode_effective\tmodel_load_dtype_effective\tattn_impl_effective\tspeech_attn_impl_effective\ttext_attn_impl_effective\ttorch_compile_enabled\ttf32_enabled\tgpu_name\tgpu_cc\tgpu_uuid_list\tgpu_power_limit_w\tpcie_gen\tdriver_version\tgit_commit_hash\tgit_commit_short\tgit_branch\tgit_dirty\tgpu_telemetry_rows\tgpu_telemetry_empty_flag'
 declare -A COMPLETED_RUNS
 
 PYTHON_CMD=(python)
@@ -344,6 +344,10 @@ fi
 
 DETECTED_GPU_NAME="unknown"
 DETECTED_GPU_CC="unknown"
+DETECTED_GPU_UUID_LIST="unknown"
+DETECTED_GPU_POWER_LIMIT_W="unknown"
+DETECTED_PCIE_GEN="unknown"
+DETECTED_DRIVER_VERSION="unknown"
 DETECTED_MIN_CC_MAJOR="0"
 FLASH_ATTN2_AVAILABLE="false"
 EFFECTIVE_PRECISION_MODE=""
@@ -445,6 +449,85 @@ PY
         ;;
     esac
   done <<< "${raw}"
+}
+
+detect_gpu_runtime_snapshot() {
+  local include="$1"
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local id_filter=""
+  local include_after_colon="${include#*:}"
+  if [[ "${include_after_colon}" != "${include}" ]]; then
+    local token=""
+    local requested_ids=()
+    IFS=',' read -r -a _ids <<< "${include_after_colon}"
+    for token in "${_ids[@]}"; do
+      token="${token//[[:space:]]/}"
+      if [[ "${token}" =~ ^[0-9]+$ ]]; then
+        requested_ids+=("${token}")
+      fi
+    done
+    if [[ "${#requested_ids[@]}" -gt 0 ]]; then
+      local IFS=','
+      id_filter="${requested_ids[*]}"
+    fi
+  fi
+
+  local query_cmd=(
+    nvidia-smi
+    --query-gpu=index,uuid,power.limit,pcie.link.gen.max,driver_version
+    --format=csv,noheader,nounits
+  )
+  if [[ -n "${id_filter}" ]]; then
+    query_cmd+=(--id="${id_filter}")
+  fi
+
+  local raw=""
+  raw="$("${query_cmd[@]}" 2>/dev/null || true)"
+  if [[ -z "${raw}" && -n "${id_filter}" ]]; then
+    echo "[WARN] Runtime snapshot query returned empty with --id=${id_filter}; retrying without id filter." >&2
+    raw="$(nvidia-smi --query-gpu=index,uuid,power.limit,pcie.link.gen.max,driver_version --format=csv,noheader,nounits 2>/dev/null || true)"
+  fi
+  if [[ -z "${raw}" ]]; then
+    return 0
+  fi
+
+  local uuids=()
+  local power_limits=()
+  local pcie_gens=()
+  local drivers=()
+  local line=""
+  while IFS= read -r line; do
+    [[ -z "${line}" ]] && continue
+    local idx="" uuid="" power_limit="" pcie_gen="" driver=""
+    IFS=',' read -r idx uuid power_limit pcie_gen driver <<< "${line}"
+    uuid="$(echo "${uuid}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    power_limit="$(echo "${power_limit}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    pcie_gen="$(echo "${pcie_gen}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    driver="$(echo "${driver}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [[ -n "${uuid}" ]] && uuids+=("${uuid}")
+    [[ -n "${power_limit}" ]] && power_limits+=("${power_limit}")
+    [[ -n "${pcie_gen}" ]] && pcie_gens+=("${pcie_gen}")
+    [[ -n "${driver}" ]] && drivers+=("${driver}")
+  done <<< "${raw}"
+
+  if [[ "${#uuids[@]}" -gt 0 ]]; then
+    local IFS=','
+    DETECTED_GPU_UUID_LIST="${uuids[*]}"
+  fi
+  if [[ "${#power_limits[@]}" -gt 0 ]]; then
+    local IFS=','
+    DETECTED_GPU_POWER_LIMIT_W="${power_limits[*]}"
+  fi
+  if [[ "${#pcie_gens[@]}" -gt 0 ]]; then
+    local IFS=','
+    DETECTED_PCIE_GEN="${pcie_gens[*]}"
+  fi
+  if [[ "${#drivers[@]}" -gt 0 ]]; then
+    DETECTED_DRIVER_VERSION="${drivers[0]}"
+  fi
 }
 
 resolve_precision_mode() {
@@ -556,6 +639,7 @@ derive_unified_attn_impl() {
 }
 
 detect_hardware_profile "${INCLUDE}"
+detect_gpu_runtime_snapshot "${INCLUDE}"
 EFFECTIVE_PRECISION_MODE="$(resolve_precision_mode "${PRECISION_MODE}" "${DETECTED_MIN_CC_MAJOR}")"
 EFFECTIVE_MODEL_LOAD_DTYPE="$(resolve_model_load_dtype "${MODEL_LOAD_DTYPE}" "${EFFECTIVE_PRECISION_MODE}")"
 EFFECTIVE_SPEECH_ATTN_IMPL="$(resolve_attn_impl "${SPEECH_ATTN_IMPL}" "${EFFECTIVE_PRECISION_MODE}" "${FLASH_ATTN2_AVAILABLE}" "${DETECTED_MIN_CC_MAJOR}" "SPEECH_ATTN_IMPL")"
@@ -1073,6 +1157,10 @@ run_case() {
     echo "matmul_precision=${MATMUL_PRECISION}"
     echo "gpu_name=${DETECTED_GPU_NAME}"
     echo "gpu_cc=${DETECTED_GPU_CC}"
+    echo "gpu_uuid_list=${DETECTED_GPU_UUID_LIST}"
+    echo "gpu_power_limit_w=${DETECTED_GPU_POWER_LIMIT_W}"
+    echo "pcie_gen=${DETECTED_PCIE_GEN}"
+    echo "driver_version=${DETECTED_DRIVER_VERSION}"
     echo "git_commit_hash=${GIT_COMMIT_HASH}"
     echo "git_commit_short=${GIT_COMMIT_SHORT}"
     echo "git_branch=${GIT_BRANCH}"
@@ -1170,7 +1258,7 @@ run_case() {
     "${deterministic}" "${cudnn_benchmark}" "${wall_clock_breakdown}"
     "${log_every}" "${val_every}" "${ckpt_every}" "${num_workers}" "${prefetch_factor}"
     "${DATASET_MANIFEST_PATH}" "${DATASET_USE_TRIM}" "${DATASET_OFFLINE_TRIMMED}" "${ENABLE_CUDA_SYNC_TIMING}" "${TIMING_RANK_SCOPE}"
-    "${PRECISION_MODE}" "${EFFECTIVE_PRECISION_MODE}" "${EFFECTIVE_MODEL_LOAD_DTYPE}" "${EFFECTIVE_ATTN_IMPL}" "${EFFECTIVE_SPEECH_ATTN_IMPL}" "${EFFECTIVE_TEXT_ATTN_IMPL}" "${ENABLE_TORCH_COMPILE}" "${EFFECTIVE_TF32_ENABLED}" "${DETECTED_GPU_NAME}" "${DETECTED_GPU_CC}" "${GIT_COMMIT_HASH}" "${GIT_COMMIT_SHORT}" "${GIT_BRANCH}" "${GIT_DIRTY}" "${gpu_telemetry_rows}" "${gpu_telemetry_empty_flag}"
+    "${PRECISION_MODE}" "${EFFECTIVE_PRECISION_MODE}" "${EFFECTIVE_MODEL_LOAD_DTYPE}" "${EFFECTIVE_ATTN_IMPL}" "${EFFECTIVE_SPEECH_ATTN_IMPL}" "${EFFECTIVE_TEXT_ATTN_IMPL}" "${ENABLE_TORCH_COMPILE}" "${EFFECTIVE_TF32_ENABLED}" "${DETECTED_GPU_NAME}" "${DETECTED_GPU_CC}" "${DETECTED_GPU_UUID_LIST}" "${DETECTED_GPU_POWER_LIMIT_W}" "${DETECTED_PCIE_GEN}" "${DETECTED_DRIVER_VERSION}" "${GIT_COMMIT_HASH}" "${GIT_COMMIT_SHORT}" "${GIT_BRANCH}" "${GIT_DIRTY}" "${gpu_telemetry_rows}" "${gpu_telemetry_empty_flag}"
   )
   (
     IFS=$'\t'
@@ -1276,6 +1364,7 @@ echo "[INFO] Mode=${MODE}, REPEATS=${REPEATS}, MAX_STEPS=${MAX_STEPS}, INCLUDE=$
 echo "[INFO] Dataset root=${DATASET_ROOT}, manifest=${DATASET_MANIFEST_PATH:-<none>}, use_trim=${DATASET_USE_TRIM}, offline_trimmed=${DATASET_OFFLINE_TRIMMED}"
 echo "[INFO] Timing flags: enable_cuda_sync_timing=${ENABLE_CUDA_SYNC_TIMING}, timing_rank_scope=${TIMING_RANK_SCOPE}"
 echo "[INFO] Runtime profile: gpu_name=${DETECTED_GPU_NAME}, gpu_cc=${DETECTED_GPU_CC}, min_cc_major=${DETECTED_MIN_CC_MAJOR}, flash_attn2_available=${FLASH_ATTN2_AVAILABLE}"
+echo "[INFO] Runtime snapshot: gpu_uuid_list=${DETECTED_GPU_UUID_LIST}, gpu_power_limit_w=${DETECTED_GPU_POWER_LIMIT_W}, pcie_gen=${DETECTED_PCIE_GEN}, driver_version=${DETECTED_DRIVER_VERSION}"
 echo "[INFO] Precision/attention: requested_precision=${PRECISION_MODE}, effective_precision=${EFFECTIVE_PRECISION_MODE}, requested_model_dtype=${MODEL_LOAD_DTYPE}, effective_model_dtype=${EFFECTIVE_MODEL_LOAD_DTYPE}, requested_attn_impl=${ATTN_IMPL}, effective_attn_impl=${EFFECTIVE_ATTN_IMPL}, speech_attn_impl=${EFFECTIVE_SPEECH_ATTN_IMPL}, text_attn_impl=${EFFECTIVE_TEXT_ATTN_IMPL}"
 echo "[INFO] Math backend: tf32_requested=${ENABLE_TF32}, tf32_effective=${EFFECTIVE_TF32_ENABLED}, matmul_precision=${MATMUL_PRECISION}"
 echo "[INFO] Code revision: git_commit=${GIT_COMMIT_SHORT}, branch=${GIT_BRANCH}, dirty=${GIT_DIRTY}"

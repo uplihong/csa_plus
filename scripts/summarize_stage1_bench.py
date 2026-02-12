@@ -225,6 +225,10 @@ def main():
             "tf32_enabled": row.get("tf32_enabled", ""),
             "gpu_name": row.get("gpu_name", ""),
             "gpu_cc": row.get("gpu_cc", ""),
+            "gpu_uuid_list": row.get("gpu_uuid_list", ""),
+            "gpu_power_limit_w": row.get("gpu_power_limit_w", ""),
+            "pcie_gen": row.get("pcie_gen", ""),
+            "driver_version": row.get("driver_version", ""),
             "git_commit_hash": row.get("git_commit_hash", ""),
             "git_commit_short": row.get("git_commit_short", ""),
             "git_branch": row.get("git_branch", ""),
@@ -358,6 +362,10 @@ def main():
                 "tf32_enabled": unique_or_mixed(rows, "tf32_enabled"),
                 "gpu_name": unique_or_mixed(rows, "gpu_name"),
                 "gpu_cc": unique_or_mixed(rows, "gpu_cc"),
+                "gpu_uuid_list": unique_or_mixed(rows, "gpu_uuid_list"),
+                "gpu_power_limit_w": unique_or_mixed(rows, "gpu_power_limit_w"),
+                "pcie_gen": unique_or_mixed(rows, "pcie_gen"),
+                "driver_version": unique_or_mixed(rows, "driver_version"),
                 "git_commit_short": unique_or_mixed(rows, "git_commit_short"),
                 "git_branch": unique_or_mixed(rows, "git_branch"),
                 "git_dirty": unique_or_mixed(rows, "git_dirty"),
@@ -450,6 +458,10 @@ def main():
             "tf32_enabled": best_group["tf32_enabled"],
             "gpu_name": best_group["gpu_name"],
             "gpu_cc": best_group["gpu_cc"],
+            "gpu_uuid_list": best_group["gpu_uuid_list"],
+            "gpu_power_limit_w": best_group["gpu_power_limit_w"],
+            "pcie_gen": best_group["pcie_gen"],
+            "driver_version": best_group["driver_version"],
             "git_commit_short": best_group["git_commit_short"],
             "git_branch": best_group["git_branch"],
             "git_dirty": best_group["git_dirty"],
@@ -500,6 +512,10 @@ def main():
             env_line("BEST_TF32_ENABLED", best_payload.get("tf32_enabled", "")),
             env_line("BEST_GPU_NAME", best_payload.get("gpu_name", "")),
             env_line("BEST_GPU_CC", best_payload.get("gpu_cc", "")),
+            env_line("BEST_GPU_UUID_LIST", best_payload.get("gpu_uuid_list", "")),
+            env_line("BEST_GPU_POWER_LIMIT_W", best_payload.get("gpu_power_limit_w", "")),
+            env_line("BEST_PCIE_GEN", best_payload.get("pcie_gen", "")),
+            env_line("BEST_DRIVER_VERSION", best_payload.get("driver_version", "")),
             env_line("BEST_GIT_COMMIT_SHORT", best_payload.get("git_commit_short", "")),
             env_line("BEST_GIT_BRANCH", best_payload.get("git_branch", "")),
             env_line("BEST_GIT_DIRTY", best_payload.get("git_dirty", "")),
@@ -560,6 +576,10 @@ def main():
         lines.append(f"- tf32_enabled: `{best_payload['tf32_enabled']}`")
         lines.append(f"- gpu_name: `{best_payload['gpu_name']}`")
         lines.append(f"- gpu_cc: `{best_payload['gpu_cc']}`")
+        lines.append(f"- gpu_uuid_list: `{best_payload['gpu_uuid_list']}`")
+        lines.append(f"- gpu_power_limit_w: `{best_payload['gpu_power_limit_w']}`")
+        lines.append(f"- pcie_gen: `{best_payload['pcie_gen']}`")
+        lines.append(f"- driver_version: `{best_payload['driver_version']}`")
         lines.append(f"- git_commit_short: `{best_payload['git_commit_short']}`")
         lines.append(f"- git_branch: `{best_payload['git_branch']}`")
         lines.append(f"- git_dirty: `{best_payload['git_dirty']}`")
