@@ -35,6 +35,14 @@ Throughput-first defaults:
 - `SPEECH_ATTN_IMPL` and `TEXT_ATTN_IMPL` can be set independently; if omitted they inherit `ATTN_IMPL`.
 - `ENABLE_TF32=true` is only effective on cc >= 8.0 GPUs.
 
+### 2.1 4090 Current Freeze Decision (2026-02 revalidation)
+
+- Mainline fixed: `z0 + sdpa + bf16(auto)`.
+- `z1` is not part of regular throughput sweep; keep only one fallback regression group for OOM scenarios.
+- `flash_attention_2` is not default on 4090 at current settings; keep as optional A/B path only.
+- Primary issue is straggler tail (`iter_p90/p50`, `rank_step_spread`) rather than memory leak.
+- `gpu_telemetry.csv` may contain occasional bad util samples; rely on `gpu_util_invalid_count_sum` and filtered `gpu_util_gap` in `suite_case_summary.csv`.
+
 ## 3. Sweep (complete matrix + partial summary on interrupt)
 
 ### 3.1 2x4090
@@ -308,6 +316,50 @@ MATMUL_PRECISION=high \
 - `<case>_r<round>/host_telemetry.csv`：CPU/RSS/load 采样。
 - `suite_case_summary.csv`：按 case 聚合指标（吞吐、稳定性、功耗、step-span）。
 - `suite_report.md`：自动 Go/No-Go 结论与下一步建议。
+
+#### 3.4.1.0b 4090 主线收敛（z0-only，小网格）
+
+2x4090（吞吐主线）：
+
+```bash
+TS=$(date +%Y%m%d_%H%M%S)
+MODE=sweep \
+INCLUDE=localhost:0,1 \
+REPEATS=3 \
+MAX_STEPS=2000 \
+SWEEP_ZERO_STAGES=0 \
+SWEEP_MICRO_BATCHES=128,160,192 \
+SWEEP_NUM_WORKERS_LIST=4,6 \
+SWEEP_PREFETCH_LIST=2,4 \
+SWEEP_LOG_EVERY=50 \
+TAIL_TIMING_POINTS=10 \
+HEARTBEAT_EVERY_SEC=30 \
+RUN_TIMEOUT_SEC=2400 \
+FAILURE_DUMP_TAIL=true \
+FAIL_TAIL_LINES=120 \
+RESUME_RUNS=true \
+SWEEP_VALIDATION_EVERY=1000000 \
+SWEEP_CHECKPOINT_EVERY=1000000 \
+DATASET_ROOT=data/LibriSpeech/LibriSpeech_16k_trim \
+DATASET_MANIFEST_PATH=data/LibriSpeech/LibriSpeech_16k_trim/manifest_16k_trim.tsv \
+DATASET_USE_TRIM=false \
+DATASET_OFFLINE_TRIMMED=true \
+ENABLE_CUDA_SYNC_TIMING=false \
+TIMING_RANK_SCOPE=rank0 \
+PRECISION_MODE=auto \
+MODEL_LOAD_DTYPE=auto \
+SPEECH_ATTN_IMPL=sdpa \
+TEXT_ATTN_IMPL=sdpa \
+ENABLE_TF32=true \
+MATMUL_PRECISION=high \
+ENABLE_TORCH_COMPILE=false \
+ENABLE_LENGTH_FIXED_SLICE=false \
+OUTPUT_ROOT=outputs/bench_2x4090_z0_converge_${TS} \
+DRIVER_LOG_PATH=outputs/bench_2x4090_z0_converge_${TS}/driver.log \
+./scripts/run_stage1_ab_bench.sh
+```
+
+4x4090：仅将 `INCLUDE` 改为 `localhost:0,1,2,3`，其余保持一致用于可比扩卡分析。
 
 #### 3.4.1.1 跑一次长时 leak 诊断（4090，z0_mb128_nw6_pf4，MAX_STEPS=10000，含主机内存采样）
 

@@ -41,6 +41,11 @@ def safe_max(values: Iterable[float]) -> float:
     return max(vals) if vals else math.nan
 
 
+def safe_sum(values: Iterable[float]) -> float:
+    vals = [v for v in values if not math.isnan(v)]
+    return sum(vals) if vals else math.nan
+
+
 def safe_percentile(values: Iterable[float], q: float) -> float:
     vals = sorted(v for v in values if not math.isnan(v))
     if not vals:
@@ -183,11 +188,16 @@ def summarize_gpu(run_dir: Path) -> Dict[str, float]:
             "gpu_util_gap_max_pct": math.nan,
             "gpu_count_detected": math.nan,
             "extreme_imbalance_ratio_90_10": math.nan,
+            "gpu_util_total_count": math.nan,
+            "gpu_util_invalid_count": math.nan,
+            "gpu_util_invalid_ratio": math.nan,
         }
 
     rows = read_csv(csv_path)
     by_ts: Dict[str, Dict[int, Tuple[float, float]]] = {}
     seen_gpu_ids = set()
+    util_total_count = 0
+    util_invalid_count = 0
     for row in rows:
         ts = str(row.get("epoch_sec", "")).strip()
         idx_f = to_float(row.get("gpu_index"))
@@ -208,7 +218,15 @@ def summarize_gpu(run_dir: Path) -> Dict[str, float]:
     util_points = 0
     for _, item in by_ts.items():
         powers = [p for _, p in item.values() if not math.isnan(p)]
-        utils = [u for u, _ in item.values() if not math.isnan(u)]
+        utils = []
+        for u, _ in item.values():
+            if math.isnan(u):
+                continue
+            util_total_count += 1
+            if 0.0 <= u <= 100.0:
+                utils.append(u)
+            else:
+                util_invalid_count += 1
 
         if gpu_count <= 1:
             if powers:
@@ -231,6 +249,9 @@ def summarize_gpu(run_dir: Path) -> Dict[str, float]:
         "gpu_util_gap_max_pct": safe_max(util_gaps),
         "gpu_count_detected": float(gpu_count) if gpu_count > 0 else math.nan,
         "extreme_imbalance_ratio_90_10": (imbalance_points / util_points) if util_points > 0 else math.nan,
+        "gpu_util_total_count": float(util_total_count),
+        "gpu_util_invalid_count": float(util_invalid_count),
+        "gpu_util_invalid_ratio": (util_invalid_count / util_total_count) if util_total_count > 0 else 0.0,
     }
 
 
@@ -393,6 +414,9 @@ def load_run_record(case_name: str, round_idx: int, case_root: Path, target_step
         "gpu_util_gap_max_pct": gpu_stats["gpu_util_gap_max_pct"],
         "gpu_count_detected": gpu_stats["gpu_count_detected"],
         "extreme_imbalance_ratio_90_10": gpu_stats["extreme_imbalance_ratio_90_10"],
+        "gpu_util_total_count": gpu_stats["gpu_util_total_count"],
+        "gpu_util_invalid_count": gpu_stats["gpu_util_invalid_count"],
+        "gpu_util_invalid_ratio": gpu_stats["gpu_util_invalid_ratio"],
         "rank_iter_spread_p90_ms": rank_spreads["rank_iter_spread_p90_ms"],
         "rank_step_spread_p90_ms": rank_spreads["rank_step_spread_p90_ms"],
         "host_rss_tail_slope_mib_min": host_stats["host_rss_tail_slope_mib_min"],
@@ -440,6 +464,9 @@ def aggregate_case(case_name: str, runs: List[Dict[str, object]]) -> Dict[str, o
             "rank_iter_spread_p90_ms": safe_median(vals("rank_iter_spread_p90_ms")),
             "rank_step_spread_p90_ms": safe_median(vals("rank_step_spread_p90_ms")),
             "extreme_imbalance_ratio_90_10": safe_median(vals("extreme_imbalance_ratio_90_10")),
+            "gpu_util_invalid_ratio": safe_median(vals("gpu_util_invalid_ratio")),
+            "gpu_util_invalid_count_sum": safe_sum(vals("gpu_util_invalid_count")),
+            "gpu_util_total_count_sum": safe_sum(vals("gpu_util_total_count")),
             "host_rss_tail_slope_mib_min_median": safe_median(vals("host_rss_tail_slope_mib_min")),
             "step_span_0_target_sec_median": safe_median(vals("step_span_0_target_sec")),
             "step_span_0_last_sec_median": safe_median(vals("step_span_0_last_sec")),
@@ -566,8 +593,8 @@ def write_markdown(
 
     lines.append("## Case Summary")
     lines.append("")
-    lines.append("| case | runs_success/runs_total | tail_samples_median | samples_per_sec_per_gpu | tail_iter_p50_median_ms | iter_p90/p50_median | step_p90/p50_median | iter_p50_cv | gpu_count_detected | rank_iter_spread_p90_ms | rank_step_spread_p90_ms | extreme_imbalance_ratio_90_10 | gpu_total_power_mean_w | gpu_util_gap_mean_pct | host_rss_tail_slope_mib_min | step_span_0_target_median_sec | dtype_warn | oom | traceback |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("| case | runs_success/runs_total | tail_samples_median | samples_per_sec_per_gpu | tail_iter_p50_median_ms | iter_p90/p50_median | step_p90/p50_median | iter_p50_cv | gpu_count_detected | rank_iter_spread_p90_ms | rank_step_spread_p90_ms | extreme_imbalance_ratio_90_10 | gpu_total_power_mean_w | gpu_util_gap_mean_pct | gpu_util_invalid_ratio | gpu_util_invalid_count_sum | host_rss_tail_slope_mib_min | step_span_0_target_median_sec | dtype_warn | oom | traceback |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     by_case = {x["case"]: x for x in case_summaries}
     for case in CASE_ORDER:
         row = by_case.get(case)
@@ -587,6 +614,8 @@ def write_markdown(
             f"{format_num(row['extreme_imbalance_ratio_90_10'], 4)} | "
             f"{format_num(row['gpu_total_power_mean_w_mean'], 2)} | "
             f"{format_num(row['gpu_util_gap_mean_pct_mean'], 2)} | "
+            f"{format_num(row['gpu_util_invalid_ratio'], 4)} | "
+            f"{format_num(row['gpu_util_invalid_count_sum'], 0)} | "
             f"{format_num(row['host_rss_tail_slope_mib_min_median'], 3)} | "
             f"{format_num(row['step_span_0_target_sec_median'], 2)} | "
             f"{row['dtype_warning_count']} | {row['oom_error_count']} | {row['traceback_error_count']} |"
