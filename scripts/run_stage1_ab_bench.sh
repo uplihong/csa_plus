@@ -35,9 +35,12 @@ STOP_ON_ERROR="${STOP_ON_ERROR:-0}"
 CONDA_ENV="${CONDA_ENV:-}"
 RUN_TIMEOUT_SEC="${RUN_TIMEOUT_SEC:-0}"               # 0 means disabled
 HEARTBEAT_EVERY_SEC="${HEARTBEAT_EVERY_SEC:-30}"      # 0 means disabled
+MAX_WAIT_TRAIN_LOG_SEC="${MAX_WAIT_TRAIN_LOG_SEC:-900}" # 0 means disabled
 FAILURE_DUMP_TAIL="${FAILURE_DUMP_TAIL:-true}"        # print log tails on failure
 FAIL_TAIL_LINES="${FAIL_TAIL_LINES:-80}"
 RESUME_RUNS="${RESUME_RUNS:-true}"                    # reuse existing run_manifest.tsv
+MANIFEST_WRITE_RETRIES="${MANIFEST_WRITE_RETRIES:-3}"
+MANIFEST_WRITE_RETRY_SLEEP_SEC="${MANIFEST_WRITE_RETRY_SLEEP_SEC:-2}"
 
 DATASET_ROOT="${DATASET_ROOT:-data/LibriSpeech/LibriSpeech}"
 DATASET_MANIFEST_PATH="${DATASET_MANIFEST_PATH:-}"
@@ -105,6 +108,7 @@ SWEEP_PREFETCH_LIST="${SWEEP_PREFETCH_LIST:-}"
 
 mkdir -p "${OUTPUT_ROOT}"
 MANIFEST_PATH="${OUTPUT_ROOT}/run_manifest.tsv"
+MANIFEST_FALLBACK_PATH="${MANIFEST_FALLBACK_PATH:-/tmp/csa_plus_run_manifest_fallback_${TIMESTAMP}_$$.tsv}"
 
 MANIFEST_HEADER=$'mode\tgroup\trepeat\tstatus\texit_code\tduration_sec\tlast_step\tlast_iter_ms_p50\titer_p90_over_p50\tdata_p90_over_p50\tstep_p90_over_p50\tunstable_run_flag\tport\trun_dir\tlauncher_log\ttrain_log\tzero_stage\tmicro_batch\tworld_size\tglobal_batch\tdeterministic\tcudnn_benchmark\twall_clock_breakdown\tlog_every_steps\tvalidation_every_steps\tcheckpoint_every_steps\tnum_workers\tprefetch_factor\tdataset_manifest_path\tdataset_use_trim\tdataset_offline_trimmed\tenable_cuda_sync_timing\ttiming_rank_scope\tprecision_mode_req\tprecision_mode_effective\tmodel_load_dtype_effective\tattn_impl_effective\tspeech_attn_impl_effective\ttext_attn_impl_effective\ttorch_compile_enabled\ttf32_enabled\tgpu_name\tgpu_cc\tgpu_uuid_list\tgpu_power_limit_w\tpcie_gen\tdriver_version\tgit_commit_hash\tgit_commit_short\tgit_branch\tgit_dirty\tgpu_telemetry_rows\tgpu_telemetry_empty_flag'
 declare -A COMPLETED_RUNS
@@ -294,8 +298,11 @@ require_model_load_dtype "${MODEL_LOAD_DTYPE}"
 require_matmul_precision "${MATMUL_PRECISION}"
 require_nonneg_int "RUN_TIMEOUT_SEC" "${RUN_TIMEOUT_SEC}"
 require_nonneg_int "HEARTBEAT_EVERY_SEC" "${HEARTBEAT_EVERY_SEC}"
+require_nonneg_int "MAX_WAIT_TRAIN_LOG_SEC" "${MAX_WAIT_TRAIN_LOG_SEC}"
 require_pos_int "GPU_TELEMETRY_INTERVAL_SEC" "${GPU_TELEMETRY_INTERVAL_SEC}"
 require_pos_int "FAIL_TAIL_LINES" "${FAIL_TAIL_LINES}"
+require_pos_int "MANIFEST_WRITE_RETRIES" "${MANIFEST_WRITE_RETRIES}"
+require_nonneg_int "MANIFEST_WRITE_RETRY_SLEEP_SEC" "${MANIFEST_WRITE_RETRY_SLEEP_SEC}"
 require_nonempty "TORCH_COMPILE_MODE" "${TORCH_COMPILE_MODE}"
 require_pos_float "STALL_ALERT_RATIO" "${STALL_ALERT_RATIO}"
 
@@ -699,7 +706,9 @@ init_manifest() {
       local backup_path="${MANIFEST_PATH}.bak_$(date +%Y%m%d_%H%M%S)"
       cp "${MANIFEST_PATH}" "${backup_path}" || true
       echo "[WARN] Existing manifest header mismatch. Backed up old manifest to ${backup_path}, then resetting ${MANIFEST_PATH}" >&2
-      echo "${MANIFEST_HEADER}" > "${MANIFEST_PATH}"
+      if ! write_manifest_header_with_retry "${MANIFEST_PATH}"; then
+        echo "[WARN] Failed to reset primary manifest header at ${MANIFEST_PATH}; will use fallback manifest if needed." >&2
+      fi
       return 0
     fi
 
@@ -715,8 +724,132 @@ init_manifest() {
     done < "${MANIFEST_PATH}"
     echo "[INFO] Resuming with existing manifest: ${MANIFEST_PATH} (successful runs cached=${loaded})"
   else
-    echo "${MANIFEST_HEADER}" > "${MANIFEST_PATH}"
+    if ! write_manifest_header_with_retry "${MANIFEST_PATH}"; then
+      echo "[WARN] Failed to initialize primary manifest at ${MANIFEST_PATH}; will use fallback manifest if needed." >&2
+    fi
   fi
+}
+
+write_manifest_header_with_retry() {
+  local target_path="$1"
+  local attempts=0
+  while [[ "${attempts}" -lt "${MANIFEST_WRITE_RETRIES}" ]]; do
+    if printf '%s\n' "${MANIFEST_HEADER}" > "${target_path}"; then
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    echo "[WARN] Failed to write manifest header to ${target_path} (attempt ${attempts}/${MANIFEST_WRITE_RETRIES})." >&2
+    if [[ "${attempts}" -lt "${MANIFEST_WRITE_RETRIES}" && "${MANIFEST_WRITE_RETRY_SLEEP_SEC}" -gt 0 ]]; then
+      sleep "${MANIFEST_WRITE_RETRY_SLEEP_SEC}"
+    fi
+  done
+  return 1
+}
+
+append_manifest_line_with_retry() {
+  local line="$1"
+  local target_path="$2"
+  local attempts=0
+  while [[ "${attempts}" -lt "${MANIFEST_WRITE_RETRIES}" ]]; do
+    if printf '%s\n' "${line}" >> "${target_path}"; then
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    echo "[WARN] Failed to append manifest line to ${target_path} (attempt ${attempts}/${MANIFEST_WRITE_RETRIES})." >&2
+    if [[ "${attempts}" -lt "${MANIFEST_WRITE_RETRIES}" && "${MANIFEST_WRITE_RETRY_SLEEP_SEC}" -gt 0 ]]; then
+      sleep "${MANIFEST_WRITE_RETRY_SLEEP_SEC}"
+    fi
+  done
+  return 1
+}
+
+ensure_fallback_manifest_ready() {
+  if [[ -z "${MANIFEST_FALLBACK_PATH}" ]]; then
+    return 1
+  fi
+  local fallback_dir
+  fallback_dir="$(dirname "${MANIFEST_FALLBACK_PATH}")"
+  if ! mkdir -p "${fallback_dir}"; then
+    echo "[WARN] Failed to create fallback manifest directory: ${fallback_dir}" >&2
+    return 1
+  fi
+  if [[ ! -f "${MANIFEST_FALLBACK_PATH}" ]]; then
+    if ! write_manifest_header_with_retry "${MANIFEST_FALLBACK_PATH}"; then
+      echo "[WARN] Failed to initialize fallback manifest: ${MANIFEST_FALLBACK_PATH}" >&2
+      return 1
+    fi
+  fi
+  return 0
+}
+
+append_manifest_row_resilient() {
+  local -n manifest_row_ref="$1"
+  local IFS=$'\t'
+  local row_line=""
+  row_line="${manifest_row_ref[*]}"
+
+  if append_manifest_line_with_retry "${row_line}" "${MANIFEST_PATH}"; then
+    return 0
+  fi
+
+  echo "[WARN] Primary manifest append failed. Falling back to ${MANIFEST_FALLBACK_PATH}" >&2
+  if ! ensure_fallback_manifest_ready; then
+    return 1
+  fi
+  if append_manifest_line_with_retry "${row_line}" "${MANIFEST_FALLBACK_PATH}"; then
+    echo "[WARN] Persisted manifest row into fallback manifest: ${MANIFEST_FALLBACK_PATH}" >&2
+    return 0
+  fi
+  return 1
+}
+
+merge_fallback_manifest_rows() {
+  if [[ -z "${MANIFEST_FALLBACK_PATH}" || ! -f "${MANIFEST_FALLBACK_PATH}" ]]; then
+    return 0
+  fi
+
+  local fallback_lines=0
+  fallback_lines="$(wc -l < "${MANIFEST_FALLBACK_PATH}" || echo 0)"
+  if [[ ! "${fallback_lines}" =~ ^[0-9]+$ ]] || [[ "${fallback_lines}" -le 1 ]]; then
+    return 0
+  fi
+
+  if [[ ! -f "${MANIFEST_PATH}" ]]; then
+    if ! write_manifest_header_with_retry "${MANIFEST_PATH}"; then
+      echo "[WARN] Cannot create primary manifest for fallback merge: ${MANIFEST_PATH}" >&2
+      return 1
+    fi
+  fi
+
+  local rows_to_merge=$((fallback_lines - 1))
+  echo "[WARN] Attempting to merge fallback manifest rows into primary manifest (${rows_to_merge} rows)." >&2
+  local merge_failed=0
+  local line=""
+  local merge_input=""
+  merge_input="$(mktemp /tmp/csa_plus_manifest_merge.XXXXXX)"
+  if ! tail -n +2 "${MANIFEST_FALLBACK_PATH}" > "${merge_input}"; then
+    echo "[WARN] Failed to read fallback manifest rows from ${MANIFEST_FALLBACK_PATH}" >&2
+    rm -f "${merge_input}" || true
+    return 1
+  fi
+
+  while IFS= read -r line; do
+    [[ -z "${line}" ]] && continue
+    if ! append_manifest_line_with_retry "${line}" "${MANIFEST_PATH}"; then
+      merge_failed=1
+      break
+    fi
+  done < "${merge_input}"
+  rm -f "${merge_input}" || true
+
+  if [[ "${merge_failed}" -eq 1 ]]; then
+    echo "[WARN] Failed to fully merge fallback manifest rows; keeping fallback file: ${MANIFEST_FALLBACK_PATH}" >&2
+    return 1
+  fi
+
+  rm -f "${MANIFEST_FALLBACK_PATH}" || true
+  echo "[INFO] Merged fallback manifest rows into ${MANIFEST_PATH}" >&2
+  return 0
 }
 
 extract_last_step() {
@@ -805,11 +938,13 @@ count_telemetry_rows() {
 start_heartbeat() {
   local out_pid_var="$1"
   local child_pid="$2"
-  local group="$3"
-  local repeat="$4"
-  local train_log="$5"
-  local interval="$6"
-  local stall_alert_ratio="$7"
+  local child_pgid="$3"
+  local group="$4"
+  local repeat="$5"
+  local train_log="$6"
+  local interval="$7"
+  local stall_alert_ratio="$8"
+  local max_wait_train_log_sec="$9"
 
   printf -v "${out_pid_var}" "%s" ""
   if [[ "${interval}" -le 0 ]]; then
@@ -820,12 +955,28 @@ start_heartbeat() {
     local prev_step=""
     local prev_iter_ms=""
     local stagnant_count=0
+    local train_log_missing_sec=0
     while kill -0 "${child_pid}" 2>/dev/null; do
       sleep "${interval}"
       if [[ ! -f "${train_log}" ]]; then
+        train_log_missing_sec=$((train_log_missing_sec + interval))
         echo "[INFO] heartbeat ${group} r${repeat}: waiting for ${train_log}" >&2
+        if [[ "${max_wait_train_log_sec}" -gt 0 && "${train_log_missing_sec}" -ge "${max_wait_train_log_sec}" ]]; then
+          echo "[WARN] heartbeat ${group} r${repeat}: train.log did not appear within ${max_wait_train_log_sec}s, terminating run pid=${child_pid} pgid=${child_pgid:-N/A}" >&2
+          if [[ -n "${child_pgid}" ]]; then
+            kill -TERM -- "-${child_pgid}" 2>/dev/null || true
+            sleep 2
+            kill -KILL -- "-${child_pgid}" 2>/dev/null || true
+          else
+            kill -TERM "${child_pid}" 2>/dev/null || true
+            sleep 2
+            kill -KILL "${child_pid}" 2>/dev/null || true
+          fi
+          break
+        fi
         continue
       fi
+      train_log_missing_sec=0
       local step=""
       local iter_ms=""
       step="$(extract_last_step "${train_log}")"
@@ -906,10 +1057,19 @@ start_gpu_telemetry() {
     local used_id_fallback="false"
     local sample_rows=0
     local empty_ticks=0
+    local telemetry_target="${telemetry_csv}"
     if [[ -z "${id_filter}" && "${include}" == *":"* ]]; then
       id_filter="$(extract_include_gpu_ids "${include}")"
     fi
-    echo "timestamp,epoch_sec,gpu_index,gpu_uuid,gpu_name,temp_c,util_gpu_pct,util_mem_pct,power_w,sm_clock_mhz,mem_clock_mhz,mem_used_mib,mem_total_mib" > "${telemetry_csv}"
+    if ! echo "timestamp,epoch_sec,gpu_index,gpu_uuid,gpu_name,temp_c,util_gpu_pct,util_mem_pct,power_w,sm_clock_mhz,mem_clock_mhz,mem_used_mib,mem_total_mib" > "${telemetry_target}"; then
+      local fallback_csv="/tmp/csa_plus_gpu_telemetry_${TIMESTAMP}_$$_${child_pid}.csv"
+      echo "[WARN] Failed to initialize telemetry CSV at ${telemetry_target}; fallback to ${fallback_csv}" >&2
+      if ! echo "timestamp,epoch_sec,gpu_index,gpu_uuid,gpu_name,temp_c,util_gpu_pct,util_mem_pct,power_w,sm_clock_mhz,mem_clock_mhz,mem_used_mib,mem_total_mib" > "${fallback_csv}"; then
+        echo "[WARN] Failed to initialize fallback telemetry CSV ${fallback_csv}; skip telemetry for this run." >&2
+        exit 0
+      fi
+      telemetry_target="${fallback_csv}"
+    fi
     while kill -0 "${child_pid}" 2>/dev/null; do
       local ts
       local epoch
@@ -927,7 +1087,7 @@ start_gpu_telemetry() {
       fi
       raw="$("${nvsmi_cmd[@]}" 2>/dev/null || true)"
       if [[ -z "${raw}" && -n "${id_filter}" && "${used_id_fallback}" == "false" ]]; then
-        echo "[WARN] Telemetry query returned empty with --id=${id_filter}; retrying without id filter for ${telemetry_csv}" >&2
+        echo "[WARN] Telemetry query returned empty with --id=${id_filter}; retrying without id filter for ${telemetry_target}" >&2
         used_id_fallback="true"
         id_filter=""
         raw="$(nvidia-smi --query-gpu=index,uuid,name,temperature.gpu,utilization.gpu,utilization.memory,power.draw,clocks.sm,clocks.mem,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null || true)"
@@ -940,19 +1100,26 @@ start_gpu_telemetry() {
           [[ -z "${line}" ]] && continue
           local idx uuid name temp util_gpu util_mem power sm_clk mem_clk mem_used mem_total
           IFS=',' read -r idx uuid name temp util_gpu util_mem power sm_clk mem_clk mem_used mem_total <<< "${line}"
-          echo "${ts},${epoch},${idx//[[:space:]]/},${uuid//[[:space:]]/},$(echo "${name}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'),${temp//[[:space:]]/},${util_gpu//[[:space:]]/},${util_mem//[[:space:]]/},${power//[[:space:]]/},${sm_clk//[[:space:]]/},${mem_clk//[[:space:]]/},${mem_used//[[:space:]]/},${mem_total//[[:space:]]/}" >> "${telemetry_csv}"
+          echo "${ts},${epoch},${idx//[[:space:]]/},${uuid//[[:space:]]/},$(echo "${name}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'),${temp//[[:space:]]/},${util_gpu//[[:space:]]/},${util_mem//[[:space:]]/},${power//[[:space:]]/},${sm_clk//[[:space:]]/},${mem_clk//[[:space:]]/},${mem_used//[[:space:]]/},${mem_total//[[:space:]]/}" >> "${telemetry_target}"
           sample_rows=$((sample_rows + 1))
         done <<< "${raw}"
       else
         empty_ticks=$((empty_ticks + 1))
         if [[ "${empty_ticks}" -eq 1 || $((empty_ticks % 15)) -eq 0 ]]; then
-          echo "[WARN] Telemetry query produced no rows (tick=${empty_ticks}): ${telemetry_csv}" >&2
+          echo "[WARN] Telemetry query produced no rows (tick=${empty_ticks}): ${telemetry_target}" >&2
         fi
       fi
       sleep "${interval}"
     done
     if [[ "${sample_rows}" -eq 0 ]]; then
-      echo "[WARN] Telemetry exited with zero samples: ${telemetry_csv}" >&2
+      echo "[WARN] Telemetry exited with zero samples: ${telemetry_target}" >&2
+    fi
+    if [[ "${telemetry_target}" != "${telemetry_csv}" ]]; then
+      if cp "${telemetry_target}" "${telemetry_csv}" 2>/dev/null; then
+        echo "[INFO] Telemetry fallback copied to requested path: ${telemetry_csv}" >&2
+      else
+        echo "[WARN] Telemetry data only available at fallback path: ${telemetry_target}" >&2
+      fi
     fi
   ) &
   printf -v "${out_pid_var}" "%s" "$!"
@@ -1205,7 +1372,7 @@ run_case() {
   ACTIVE_RUN_PGID="${run_pgid}"
 
   local heartbeat_pid=""
-  start_heartbeat heartbeat_pid "${run_pid}" "${group}" "${repeat}" "${train_log}" "${HEARTBEAT_EVERY_SEC}" "${STALL_ALERT_RATIO}"
+  start_heartbeat heartbeat_pid "${run_pid}" "${run_pgid}" "${group}" "${repeat}" "${train_log}" "${HEARTBEAT_EVERY_SEC}" "${STALL_ALERT_RATIO}" "${MAX_WAIT_TRAIN_LOG_SEC}"
   ACTIVE_HEARTBEAT_PID="${heartbeat_pid}"
   local telemetry_pid=""
   start_gpu_telemetry telemetry_pid "${run_pid}" "${telemetry_csv}" "${GPU_TELEMETRY_INTERVAL_SEC}" "${INCLUDE}" "${include_gpu_ids}"
@@ -1260,10 +1427,9 @@ run_case() {
     "${DATASET_MANIFEST_PATH}" "${DATASET_USE_TRIM}" "${DATASET_OFFLINE_TRIMMED}" "${ENABLE_CUDA_SYNC_TIMING}" "${TIMING_RANK_SCOPE}"
     "${PRECISION_MODE}" "${EFFECTIVE_PRECISION_MODE}" "${EFFECTIVE_MODEL_LOAD_DTYPE}" "${EFFECTIVE_ATTN_IMPL}" "${EFFECTIVE_SPEECH_ATTN_IMPL}" "${EFFECTIVE_TEXT_ATTN_IMPL}" "${ENABLE_TORCH_COMPILE}" "${EFFECTIVE_TF32_ENABLED}" "${DETECTED_GPU_NAME}" "${DETECTED_GPU_CC}" "${DETECTED_GPU_UUID_LIST}" "${DETECTED_GPU_POWER_LIMIT_W}" "${DETECTED_PCIE_GEN}" "${DETECTED_DRIVER_VERSION}" "${GIT_COMMIT_HASH}" "${GIT_COMMIT_SHORT}" "${GIT_BRANCH}" "${GIT_DIRTY}" "${gpu_telemetry_rows}" "${gpu_telemetry_empty_flag}"
   )
-  (
-    IFS=$'\t'
-    printf '%s\n' "${manifest_row[*]}"
-  ) >> "${MANIFEST_PATH}"
+  if ! append_manifest_row_resilient manifest_row; then
+    echo "[WARN] Unable to persist manifest row for ${group} r${repeat}. run status may be missing from summary." >&2
+  fi
 
   if [[ "${status}" == "failed" ]]; then
     echo "[WARN] ${group} repeat ${repeat} failed (exit_code=${exit_code}, duration_sec=${duration_sec}, last_step=${last_step:-N/A})" >&2
@@ -1321,19 +1487,49 @@ generate_summary() {
   fi
   SUMMARY_RAN=1
 
-  if [[ ! -f "${MANIFEST_PATH}" ]]; then
-    echo "[WARN] Manifest not found. Skip summary generation: ${MANIFEST_PATH}" >&2
+  if ! merge_fallback_manifest_rows; then
+    echo "[WARN] Proceeding with available manifest data after fallback-merge failure." >&2
+  fi
+
+  local manifest_for_summary="${MANIFEST_PATH}"
+  if [[ ! -f "${manifest_for_summary}" ]]; then
+    if [[ -n "${MANIFEST_FALLBACK_PATH}" && -f "${MANIFEST_FALLBACK_PATH}" ]]; then
+      echo "[WARN] Primary manifest missing; using fallback manifest for summary: ${MANIFEST_FALLBACK_PATH}" >&2
+      manifest_for_summary="${MANIFEST_FALLBACK_PATH}"
+    else
+      echo "[WARN] Manifest not found. Skip summary generation: ${MANIFEST_PATH}" >&2
+      return 0
+    fi
+  fi
+
+  if [[ ! -f "${manifest_for_summary}" ]]; then
+    echo "[WARN] No readable manifest for summary generation." >&2
     return 0
   fi
-  local line_count
-  line_count=$(wc -l < "${MANIFEST_PATH}")
+  local line_count=0
+  if ! line_count="$(wc -l < "${manifest_for_summary}" 2>/dev/null)"; then
+    echo "[WARN] Failed to read manifest line count: ${manifest_for_summary}" >&2
+    if [[ "${manifest_for_summary}" != "${MANIFEST_FALLBACK_PATH}" && -n "${MANIFEST_FALLBACK_PATH}" && -f "${MANIFEST_FALLBACK_PATH}" ]]; then
+      manifest_for_summary="${MANIFEST_FALLBACK_PATH}"
+      if ! line_count="$(wc -l < "${manifest_for_summary}" 2>/dev/null)"; then
+        echo "[WARN] Failed to read fallback manifest line count: ${manifest_for_summary}" >&2
+        return 0
+      fi
+    else
+      return 0
+    fi
+  fi
+  if [[ ! "${line_count}" =~ ^[0-9]+$ ]]; then
+    echo "[WARN] Invalid manifest line count: ${line_count}" >&2
+    return 0
+  fi
   if [[ "${line_count}" -le 1 ]]; then
     echo "[WARN] Manifest has no run rows yet. Skip summary generation." >&2
     return 0
   fi
 
   "${PYTHON_CMD[@]}" "${SUMMARY_SCRIPT}" \
-    --manifest "${MANIFEST_PATH}" \
+    --manifest "${manifest_for_summary}" \
     --output-root "${OUTPUT_ROOT}" \
     --tail-points "${TAIL_TIMING_POINTS}" \
     --baseline-group "${BASELINE_GROUP}"
@@ -1369,7 +1565,8 @@ echo "[INFO] Precision/attention: requested_precision=${PRECISION_MODE}, effecti
 echo "[INFO] Math backend: tf32_requested=${ENABLE_TF32}, tf32_effective=${EFFECTIVE_TF32_ENABLED}, matmul_precision=${MATMUL_PRECISION}"
 echo "[INFO] Code revision: git_commit=${GIT_COMMIT_SHORT}, branch=${GIT_BRANCH}, dirty=${GIT_DIRTY}"
 echo "[INFO] Compile/fixed-slice: enable_torch_compile=${ENABLE_TORCH_COMPILE}, torch_compile_mode=${TORCH_COMPILE_MODE}, torch_compile_dynamic=${TORCH_COMPILE_DYNAMIC}, enable_length_fixed_slice=${ENABLE_LENGTH_FIXED_SLICE}, fixed_slice_seconds=${FIXED_SLICE_SECONDS:-<none>}"
-echo "[INFO] Telemetry/stall-alert: enable_gpu_telemetry=${ENABLE_GPU_TELEMETRY}, gpu_telemetry_interval_sec=${GPU_TELEMETRY_INTERVAL_SEC}, stall_alert_ratio=${STALL_ALERT_RATIO}"
+echo "[INFO] Telemetry/stall-alert: enable_gpu_telemetry=${ENABLE_GPU_TELEMETRY}, gpu_telemetry_interval_sec=${GPU_TELEMETRY_INTERVAL_SEC}, stall_alert_ratio=${STALL_ALERT_RATIO}, max_wait_train_log_sec=${MAX_WAIT_TRAIN_LOG_SEC}"
+echo "[INFO] Manifest durability: primary=${MANIFEST_PATH}, fallback=${MANIFEST_FALLBACK_PATH}, write_retries=${MANIFEST_WRITE_RETRIES}, retry_sleep_sec=${MANIFEST_WRITE_RETRY_SLEEP_SEC}"
 echo "[INFO] Driver log path: ${DRIVER_LOG_PATH:-<disabled>}"
 
 if [[ "${MODE}" == "ab" || "${MODE}" == "both" ]]; then
