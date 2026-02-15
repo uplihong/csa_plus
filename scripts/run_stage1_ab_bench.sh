@@ -19,6 +19,7 @@ set -euo pipefail
 # - summary.json
 # - summary.md
 # - <group_run>/gpu_telemetry.csv (optional)
+# - <group_run>/host_telemetry.csv (optional)
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/bench_stage1_ab_${TIMESTAMP}}"
@@ -63,8 +64,12 @@ TORCH_COMPILE_MODE="${TORCH_COMPILE_MODE:-max-autotune}"
 TORCH_COMPILE_DYNAMIC="${TORCH_COMPILE_DYNAMIC:-true}"
 ENABLE_LENGTH_FIXED_SLICE="${ENABLE_LENGTH_FIXED_SLICE:-false}"
 FIXED_SLICE_SECONDS="${FIXED_SLICE_SECONDS:-}"
+ENABLE_LENGTH_BUCKET="${ENABLE_LENGTH_BUCKET:-false}"
+LENGTH_BUCKET_BOUNDARIES_SEC="${LENGTH_BUCKET_BOUNDARIES_SEC:-1.0,1.5,2.0,2.5,3.0}"
 ENABLE_GPU_TELEMETRY="${ENABLE_GPU_TELEMETRY:-true}"
 GPU_TELEMETRY_INTERVAL_SEC="${GPU_TELEMETRY_INTERVAL_SEC:-2}"
+ENABLE_HOST_TELEMETRY="${ENABLE_HOST_TELEMETRY:-false}"
+HOST_TELEMETRY_INTERVAL_SEC="${HOST_TELEMETRY_INTERVAL_SEC:-2}"
 STALL_ALERT_RATIO="${STALL_ALERT_RATIO:-2.0}"
 
 # Baseline group for speedup metric in reports.
@@ -110,7 +115,7 @@ mkdir -p "${OUTPUT_ROOT}"
 MANIFEST_PATH="${OUTPUT_ROOT}/run_manifest.tsv"
 MANIFEST_FALLBACK_PATH="${MANIFEST_FALLBACK_PATH:-/tmp/csa_plus_run_manifest_fallback_${TIMESTAMP}_$$.tsv}"
 
-MANIFEST_HEADER=$'mode\tgroup\trepeat\tstatus\texit_code\tduration_sec\tlast_step\tlast_iter_ms_p50\titer_p90_over_p50\tdata_p90_over_p50\tstep_p90_over_p50\tunstable_run_flag\tport\trun_dir\tlauncher_log\ttrain_log\tzero_stage\tmicro_batch\tworld_size\tglobal_batch\tdeterministic\tcudnn_benchmark\twall_clock_breakdown\tlog_every_steps\tvalidation_every_steps\tcheckpoint_every_steps\tnum_workers\tprefetch_factor\tdataset_manifest_path\tdataset_use_trim\tdataset_offline_trimmed\tenable_cuda_sync_timing\ttiming_rank_scope\tprecision_mode_req\tprecision_mode_effective\tmodel_load_dtype_effective\tattn_impl_effective\tspeech_attn_impl_effective\ttext_attn_impl_effective\ttorch_compile_enabled\ttf32_enabled\tgpu_name\tgpu_cc\tgpu_uuid_list\tgpu_power_limit_w\tpcie_gen\tdriver_version\tgit_commit_hash\tgit_commit_short\tgit_branch\tgit_dirty\tgpu_telemetry_rows\tgpu_telemetry_empty_flag'
+MANIFEST_HEADER=$'mode\tgroup\trepeat\tstatus\texit_code\tduration_sec\tlast_step\tlast_iter_ms_p50\titer_p90_over_p50\tdata_p90_over_p50\tstep_p90_over_p50\tunstable_run_flag\tport\trun_dir\tlauncher_log\ttrain_log\tzero_stage\tmicro_batch\tworld_size\tglobal_batch\tdeterministic\tcudnn_benchmark\twall_clock_breakdown\tlog_every_steps\tvalidation_every_steps\tcheckpoint_every_steps\tnum_workers\tprefetch_factor\tdataset_manifest_path\tdataset_use_trim\tdataset_offline_trimmed\tenable_cuda_sync_timing\ttiming_rank_scope\tprecision_mode_req\tprecision_mode_effective\tmodel_load_dtype_effective\tattn_impl_effective\tspeech_attn_impl_effective\ttext_attn_impl_effective\ttorch_compile_enabled\ttf32_enabled\tgpu_name\tgpu_cc\tgpu_uuid_list\tgpu_power_limit_w\tpcie_gen\tdriver_version\tgit_commit_hash\tgit_commit_short\tgit_branch\tgit_dirty\tgpu_telemetry_rows\tgpu_telemetry_empty_flag\thost_telemetry_rows\thost_telemetry_empty_flag'
 declare -A COMPLETED_RUNS
 
 PYTHON_CMD=(python)
@@ -264,6 +269,39 @@ require_pos_float() {
   }
 }
 
+normalize_positive_float_csv() {
+  local name="$1"
+  local raw="$2"
+  local normalized=()
+  local token=""
+  IFS=',' read -r -a _tokens <<< "${raw}"
+  if [[ "${#_tokens[@]}" -eq 0 ]]; then
+    echo "${name} must contain at least one item." >&2
+    exit 1
+  fi
+  for token in "${_tokens[@]}"; do
+    token="${token//[[:space:]]/}"
+    if [[ -z "${token}" ]]; then
+      continue
+    fi
+    if [[ ! "${token}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+      echo "${name} contains invalid float item: ${token}" >&2
+      exit 1
+    fi
+    awk -v v="${token}" 'BEGIN{ exit !(v > 0) }' || {
+      echo "${name} item must be > 0, got: ${token}" >&2
+      exit 1
+    }
+    normalized+=("${token}")
+  done
+  if [[ "${#normalized[@]}" -eq 0 ]]; then
+    echo "${name} must contain at least one positive float item." >&2
+    exit 1
+  fi
+  local IFS=','
+  echo "${normalized[*]}"
+}
+
 require_pos_int "REPEATS" "${REPEATS}"
 require_pos_int "MASTER_PORT_BASE" "${MASTER_PORT_BASE}"
 require_pos_int "MAX_STEPS" "${MAX_STEPS}"
@@ -287,7 +325,9 @@ require_bool "RESUME_RUNS" "${RESUME_RUNS}"
 require_bool "ENABLE_TORCH_COMPILE" "${ENABLE_TORCH_COMPILE}"
 require_bool "TORCH_COMPILE_DYNAMIC" "${TORCH_COMPILE_DYNAMIC}"
 require_bool "ENABLE_LENGTH_FIXED_SLICE" "${ENABLE_LENGTH_FIXED_SLICE}"
+require_bool "ENABLE_LENGTH_BUCKET" "${ENABLE_LENGTH_BUCKET}"
 require_bool "ENABLE_GPU_TELEMETRY" "${ENABLE_GPU_TELEMETRY}"
+require_bool "ENABLE_HOST_TELEMETRY" "${ENABLE_HOST_TELEMETRY}"
 require_bool "ENABLE_TF32" "${ENABLE_TF32}"
 require_timing_rank_scope "${TIMING_RANK_SCOPE}"
 require_precision_mode "${PRECISION_MODE}"
@@ -300,6 +340,7 @@ require_nonneg_int "RUN_TIMEOUT_SEC" "${RUN_TIMEOUT_SEC}"
 require_nonneg_int "HEARTBEAT_EVERY_SEC" "${HEARTBEAT_EVERY_SEC}"
 require_nonneg_int "MAX_WAIT_TRAIN_LOG_SEC" "${MAX_WAIT_TRAIN_LOG_SEC}"
 require_pos_int "GPU_TELEMETRY_INTERVAL_SEC" "${GPU_TELEMETRY_INTERVAL_SEC}"
+require_pos_int "HOST_TELEMETRY_INTERVAL_SEC" "${HOST_TELEMETRY_INTERVAL_SEC}"
 require_pos_int "FAIL_TAIL_LINES" "${FAIL_TAIL_LINES}"
 require_pos_int "MANIFEST_WRITE_RETRIES" "${MANIFEST_WRITE_RETRIES}"
 require_nonneg_int "MANIFEST_WRITE_RETRY_SLEEP_SEC" "${MANIFEST_WRITE_RETRY_SLEEP_SEC}"
@@ -309,6 +350,11 @@ require_pos_float "STALL_ALERT_RATIO" "${STALL_ALERT_RATIO}"
 if [[ "${ENABLE_LENGTH_FIXED_SLICE}" == "true" ]]; then
   require_nonempty "FIXED_SLICE_SECONDS" "${FIXED_SLICE_SECONDS}"
   require_pos_float "FIXED_SLICE_SECONDS" "${FIXED_SLICE_SECONDS}"
+fi
+
+if [[ "${ENABLE_LENGTH_BUCKET}" == "true" ]]; then
+  require_nonempty "LENGTH_BUCKET_BOUNDARIES_SEC" "${LENGTH_BUCKET_BOUNDARIES_SEC}"
+  EFFECTIVE_LENGTH_BUCKET_BOUNDARIES_SEC="$(normalize_positive_float_csv "LENGTH_BUCKET_BOUNDARIES_SEC" "${LENGTH_BUCKET_BOUNDARIES_SEC}")"
 fi
 
 require_pos_int "AB_OLD_LOG_EVERY" "${AB_OLD_LOG_EVERY}"
@@ -363,6 +409,7 @@ EFFECTIVE_ATTN_IMPL=""
 EFFECTIVE_SPEECH_ATTN_IMPL=""
 EFFECTIVE_TEXT_ATTN_IMPL=""
 EFFECTIVE_TF32_ENABLED="false"
+EFFECTIVE_LENGTH_BUCKET_BOUNDARIES_SEC=""
 
 detect_hardware_profile() {
   local include="$1"
@@ -1125,10 +1172,117 @@ start_gpu_telemetry() {
   printf -v "${out_pid_var}" "%s" "$!"
 }
 
+start_host_telemetry() {
+  local out_pid_var="$1"
+  local child_pid="$2"
+  local child_pgid="$3"
+  local telemetry_csv="$4"
+  local interval="$5"
+
+  printf -v "${out_pid_var}" "%s" ""
+  if [[ "${ENABLE_HOST_TELEMETRY}" != "true" ]]; then
+    return 0
+  fi
+  if [[ "${interval}" -le 0 ]]; then
+    return 0
+  fi
+  if [[ ! -r /proc/stat || ! -r /proc/meminfo || ! -r /proc/loadavg ]]; then
+    echo "[WARN] ENABLE_HOST_TELEMETRY=true but /proc metrics are unavailable. Skip host telemetry for ${telemetry_csv}" >&2
+    return 0
+  fi
+
+  (
+    local telemetry_target="${telemetry_csv}"
+    local sample_rows=0
+    local prev_user=""
+    local prev_system=""
+    local prev_idle=""
+    local prev_total=""
+    if ! echo "timestamp,epoch_sec,load1,load5,load15,cpu_user_pct,cpu_system_pct,cpu_idle_pct,mem_total_kib,mem_available_kib,mem_used_kib,swap_total_kib,swap_free_kib,rss_kib" > "${telemetry_target}"; then
+      local fallback_csv="/tmp/csa_plus_host_telemetry_${TIMESTAMP}_$$_${child_pid}.csv"
+      echo "[WARN] Failed to initialize host telemetry CSV at ${telemetry_target}; fallback to ${fallback_csv}" >&2
+      if ! echo "timestamp,epoch_sec,load1,load5,load15,cpu_user_pct,cpu_system_pct,cpu_idle_pct,mem_total_kib,mem_available_kib,mem_used_kib,swap_total_kib,swap_free_kib,rss_kib" > "${fallback_csv}"; then
+        echo "[WARN] Failed to initialize fallback host telemetry CSV ${fallback_csv}; skip host telemetry for this run." >&2
+        exit 0
+      fi
+      telemetry_target="${fallback_csv}"
+    fi
+
+    while kill -0 "${child_pid}" 2>/dev/null; do
+      local ts epoch
+      ts="$(date -Is)"
+      epoch="$(date +%s)"
+
+      local cpu_line=""
+      cpu_line="$(head -n 1 /proc/stat 2>/dev/null || true)"
+      local _cpu user nice system idle iowait irq softirq steal _guest _guest_nice
+      read -r _cpu user nice system idle iowait irq softirq steal _guest _guest_nice <<< "${cpu_line}"
+      local idle_all=$((idle + iowait))
+      local non_idle=$((user + nice + system + irq + softirq + steal))
+      local total=$((idle_all + non_idle))
+
+      local cpu_user_pct="" cpu_system_pct="" cpu_idle_pct=""
+      if [[ -n "${prev_total}" ]]; then
+        local totald=$((total - prev_total))
+        local idled=$((idle_all - prev_idle))
+        local userd=$((user - prev_user))
+        local systemd=$((system - prev_system))
+        if [[ "${totald}" -gt 0 ]]; then
+          cpu_user_pct="$(awk -v n="${userd}" -v d="${totald}" 'BEGIN{printf "%.2f", (n*100.0)/d}')"
+          cpu_system_pct="$(awk -v n="${systemd}" -v d="${totald}" 'BEGIN{printf "%.2f", (n*100.0)/d}')"
+          cpu_idle_pct="$(awk -v n="${idled}" -v d="${totald}" 'BEGIN{printf "%.2f", (n*100.0)/d}')"
+        fi
+      fi
+      prev_user="${user}"
+      prev_system="${system}"
+      prev_idle="${idle_all}"
+      prev_total="${total}"
+
+      local load_line load1 load5 load15
+      load_line="$(cat /proc/loadavg 2>/dev/null || true)"
+      read -r load1 load5 load15 _rest <<< "${load_line}"
+
+      local mem_total mem_available swap_total swap_free mem_used
+      mem_total="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || true)"
+      mem_available="$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || true)"
+      swap_total="$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo 2>/dev/null || true)"
+      swap_free="$(awk '/^SwapFree:/ {print $2}' /proc/meminfo 2>/dev/null || true)"
+      mem_used=""
+      if [[ "${mem_total}" =~ ^[0-9]+$ && "${mem_available}" =~ ^[0-9]+$ ]]; then
+        mem_used=$((mem_total - mem_available))
+      fi
+
+      local rss_kib=""
+      if [[ -n "${child_pgid}" ]]; then
+        rss_kib="$(ps -eo pgid=,rss= 2>/dev/null | awk -v pg="${child_pgid}" '$1==pg{sum+=$2} END{printf "%.0f", sum+0}')"
+      else
+        rss_kib="$(ps -o rss= -p "${child_pid}" 2>/dev/null | awk '{sum+=$1} END{printf "%.0f", sum+0}')"
+      fi
+
+      echo "${ts},${epoch},${load1:-},${load5:-},${load15:-},${cpu_user_pct},${cpu_system_pct},${cpu_idle_pct},${mem_total:-},${mem_available:-},${mem_used},${swap_total:-},${swap_free:-},${rss_kib}" >> "${telemetry_target}"
+      sample_rows=$((sample_rows + 1))
+      sleep "${interval}"
+    done
+
+    if [[ "${sample_rows}" -eq 0 ]]; then
+      echo "[WARN] Host telemetry exited with zero samples: ${telemetry_target}" >&2
+    fi
+    if [[ "${telemetry_target}" != "${telemetry_csv}" ]]; then
+      if cp "${telemetry_target}" "${telemetry_csv}" 2>/dev/null; then
+        echo "[INFO] Host telemetry fallback copied to requested path: ${telemetry_csv}" >&2
+      else
+        echo "[WARN] Host telemetry data only available at fallback path: ${telemetry_target}" >&2
+      fi
+    fi
+  ) &
+  printf -v "${out_pid_var}" "%s" "$!"
+}
+
 ACTIVE_RUN_PID=""
 ACTIVE_RUN_PGID=""
 ACTIVE_HEARTBEAT_PID=""
 ACTIVE_TELEMETRY_PID=""
+ACTIVE_HOST_TELEMETRY_PID=""
 
 stop_active_heartbeat() {
   if [[ -z "${ACTIVE_HEARTBEAT_PID}" ]]; then
@@ -1150,6 +1304,17 @@ stop_active_telemetry() {
     wait "${ACTIVE_TELEMETRY_PID}" 2>/dev/null || true
   fi
   ACTIVE_TELEMETRY_PID=""
+}
+
+stop_active_host_telemetry() {
+  if [[ -z "${ACTIVE_HOST_TELEMETRY_PID}" ]]; then
+    return 0
+  fi
+  if kill -0 "${ACTIVE_HOST_TELEMETRY_PID}" 2>/dev/null; then
+    kill "${ACTIVE_HOST_TELEMETRY_PID}" 2>/dev/null || true
+    wait "${ACTIVE_HOST_TELEMETRY_PID}" 2>/dev/null || true
+  fi
+  ACTIVE_HOST_TELEMETRY_PID=""
 }
 
 terminate_active_run() {
@@ -1200,6 +1365,7 @@ run_case() {
   local launcher_log="${run_dir}/launcher.log"
   local train_log="${run_dir}/train.log"
   local telemetry_csv="${run_dir}/gpu_telemetry.csv"
+  local host_telemetry_csv="${run_dir}/host_telemetry.csv"
   local run_key="${mode_name}::${group}::${repeat}"
   if [[ "${RESUME_RUNS}" == "true" && -n "${COMPLETED_RUNS["${run_key}"]+x}" ]]; then
     echo "[INFO] SKIP ${group} r${repeat}: already successful in manifest"
@@ -1240,6 +1406,7 @@ run_case() {
     "++train.cudnn_benchmark=${cudnn_benchmark}"
     "++train.data.num_workers=${num_workers}"
     "++train.data.prefetch_factor=${prefetch_factor}"
+    "++train.data.use_length_bucket=${ENABLE_LENGTH_BUCKET}"
     "++train.enable_cuda_sync_timing=${ENABLE_CUDA_SYNC_TIMING}"
     "++train.timing_rank_scope=${TIMING_RANK_SCOPE}"
     "++train.enable_torch_compile=${ENABLE_TORCH_COMPILE}"
@@ -1269,6 +1436,9 @@ run_case() {
   if [[ "${ENABLE_LENGTH_FIXED_SLICE}" == "true" ]]; then
     cmd+=("++train.fixed_slice_seconds=${FIXED_SLICE_SECONDS}")
   fi
+  if [[ "${ENABLE_LENGTH_BUCKET}" == "true" ]]; then
+    cmd+=("++train.data.bucket_boundaries_second=[${EFFECTIVE_LENGTH_BUCKET_BOUNDARIES_SEC}]")
+  fi
 
   local status="success"
   local exit_code=0
@@ -1283,6 +1453,8 @@ run_case() {
   local unstable_run_flag="false"
   local gpu_telemetry_rows=""
   local gpu_telemetry_empty_flag="false"
+  local host_telemetry_rows=""
+  local host_telemetry_empty_flag="false"
   local include_gpu_ids=""
   include_gpu_ids="$(extract_include_gpu_ids "${INCLUDE}")"
 
@@ -1335,9 +1507,14 @@ run_case() {
     echo "enable_gpu_telemetry=${ENABLE_GPU_TELEMETRY}"
     echo "gpu_telemetry_interval_sec=${GPU_TELEMETRY_INTERVAL_SEC}"
     echo "gpu_telemetry_csv=${telemetry_csv}"
+    echo "enable_host_telemetry=${ENABLE_HOST_TELEMETRY}"
+    echo "host_telemetry_interval_sec=${HOST_TELEMETRY_INTERVAL_SEC}"
+    echo "host_telemetry_csv=${host_telemetry_csv}"
     echo "stall_alert_ratio=${STALL_ALERT_RATIO}"
     echo "enable_length_fixed_slice=${ENABLE_LENGTH_FIXED_SLICE}"
     echo "fixed_slice_seconds=${FIXED_SLICE_SECONDS}"
+    echo "enable_length_bucket=${ENABLE_LENGTH_BUCKET}"
+    echo "length_bucket_boundaries_sec=${EFFECTIVE_LENGTH_BUCKET_BOUNDARIES_SEC}"
     echo "run_dir=${run_dir}"
     echo "=== CMD ==="
     printf '%q ' "${cmd[@]}"
@@ -1377,6 +1554,9 @@ run_case() {
   local telemetry_pid=""
   start_gpu_telemetry telemetry_pid "${run_pid}" "${telemetry_csv}" "${GPU_TELEMETRY_INTERVAL_SEC}" "${INCLUDE}" "${include_gpu_ids}"
   ACTIVE_TELEMETRY_PID="${telemetry_pid}"
+  local host_telemetry_pid=""
+  start_host_telemetry host_telemetry_pid "${run_pid}" "${run_pgid}" "${host_telemetry_csv}" "${HOST_TELEMETRY_INTERVAL_SEC}"
+  ACTIVE_HOST_TELEMETRY_PID="${host_telemetry_pid}"
 
   if wait "${run_pid}"; then
     exit_code=0
@@ -1393,8 +1573,13 @@ run_case() {
     kill "${telemetry_pid}" 2>/dev/null || true
     wait "${telemetry_pid}" 2>/dev/null || true
   fi
+  if [[ -n "${host_telemetry_pid}" ]]; then
+    kill "${host_telemetry_pid}" 2>/dev/null || true
+    wait "${host_telemetry_pid}" 2>/dev/null || true
+  fi
   ACTIVE_HEARTBEAT_PID=""
   ACTIVE_TELEMETRY_PID=""
+  ACTIVE_HOST_TELEMETRY_PID=""
   ACTIVE_RUN_PID=""
   ACTIVE_RUN_PGID=""
 
@@ -1418,6 +1603,18 @@ run_case() {
       gpu_telemetry_rows="0"
     fi
   fi
+  host_telemetry_rows="$(count_telemetry_rows "${host_telemetry_csv}")"
+  if [[ "${ENABLE_HOST_TELEMETRY}" == "true" ]]; then
+    if [[ -z "${host_telemetry_rows}" || ! "${host_telemetry_rows}" =~ ^[0-9]+$ ]]; then
+      host_telemetry_empty_flag="true"
+      echo "[WARN] Host telemetry enabled but no samples were collected: ${host_telemetry_csv}" >&2
+      host_telemetry_rows="0"
+    elif [[ "${host_telemetry_rows}" -le 0 ]]; then
+      host_telemetry_empty_flag="true"
+      echo "[WARN] Host telemetry enabled but no samples were collected: ${host_telemetry_csv}" >&2
+      host_telemetry_rows="0"
+    fi
+  fi
 
   local manifest_row=(
     "${mode_name}" "${group}" "${repeat}" "${status}" "${exit_code}" "${duration_sec}" "${last_step}" "${last_iter_ms_p50}" "${iter_p90_over_p50}" "${data_p90_over_p50}" "${step_p90_over_p50}" "${unstable_run_flag}" "${port}" "${run_dir}" "${launcher_log}" "${train_log}"
@@ -1425,7 +1622,7 @@ run_case() {
     "${deterministic}" "${cudnn_benchmark}" "${wall_clock_breakdown}"
     "${log_every}" "${val_every}" "${ckpt_every}" "${num_workers}" "${prefetch_factor}"
     "${DATASET_MANIFEST_PATH}" "${DATASET_USE_TRIM}" "${DATASET_OFFLINE_TRIMMED}" "${ENABLE_CUDA_SYNC_TIMING}" "${TIMING_RANK_SCOPE}"
-    "${PRECISION_MODE}" "${EFFECTIVE_PRECISION_MODE}" "${EFFECTIVE_MODEL_LOAD_DTYPE}" "${EFFECTIVE_ATTN_IMPL}" "${EFFECTIVE_SPEECH_ATTN_IMPL}" "${EFFECTIVE_TEXT_ATTN_IMPL}" "${ENABLE_TORCH_COMPILE}" "${EFFECTIVE_TF32_ENABLED}" "${DETECTED_GPU_NAME}" "${DETECTED_GPU_CC}" "${DETECTED_GPU_UUID_LIST}" "${DETECTED_GPU_POWER_LIMIT_W}" "${DETECTED_PCIE_GEN}" "${DETECTED_DRIVER_VERSION}" "${GIT_COMMIT_HASH}" "${GIT_COMMIT_SHORT}" "${GIT_BRANCH}" "${GIT_DIRTY}" "${gpu_telemetry_rows}" "${gpu_telemetry_empty_flag}"
+    "${PRECISION_MODE}" "${EFFECTIVE_PRECISION_MODE}" "${EFFECTIVE_MODEL_LOAD_DTYPE}" "${EFFECTIVE_ATTN_IMPL}" "${EFFECTIVE_SPEECH_ATTN_IMPL}" "${EFFECTIVE_TEXT_ATTN_IMPL}" "${ENABLE_TORCH_COMPILE}" "${EFFECTIVE_TF32_ENABLED}" "${DETECTED_GPU_NAME}" "${DETECTED_GPU_CC}" "${DETECTED_GPU_UUID_LIST}" "${DETECTED_GPU_POWER_LIMIT_W}" "${DETECTED_PCIE_GEN}" "${DETECTED_DRIVER_VERSION}" "${GIT_COMMIT_HASH}" "${GIT_COMMIT_SHORT}" "${GIT_BRANCH}" "${GIT_DIRTY}" "${gpu_telemetry_rows}" "${gpu_telemetry_empty_flag}" "${host_telemetry_rows}" "${host_telemetry_empty_flag}"
   )
   if ! append_manifest_row_resilient manifest_row; then
     echo "[WARN] Unable to persist manifest row for ${group} r${repeat}. run status may be missing from summary." >&2
@@ -1477,6 +1674,7 @@ handle_interrupt() {
   echo "[WARN] Received interrupt signal. Writing partial benchmark summary..." >&2
   stop_active_heartbeat
   stop_active_telemetry
+  stop_active_host_telemetry
   terminate_active_run "interrupt signal received"
   exit 130
 }
@@ -1539,6 +1737,7 @@ finalize_on_exit() {
   local exit_code="$1"
   stop_active_heartbeat
   stop_active_telemetry
+  stop_active_host_telemetry
   terminate_active_run "script exiting"
   if [[ "${SUMMARY_RAN}" -eq 0 ]]; then
     if ! generate_summary; then
@@ -1565,7 +1764,8 @@ echo "[INFO] Precision/attention: requested_precision=${PRECISION_MODE}, effecti
 echo "[INFO] Math backend: tf32_requested=${ENABLE_TF32}, tf32_effective=${EFFECTIVE_TF32_ENABLED}, matmul_precision=${MATMUL_PRECISION}"
 echo "[INFO] Code revision: git_commit=${GIT_COMMIT_SHORT}, branch=${GIT_BRANCH}, dirty=${GIT_DIRTY}"
 echo "[INFO] Compile/fixed-slice: enable_torch_compile=${ENABLE_TORCH_COMPILE}, torch_compile_mode=${TORCH_COMPILE_MODE}, torch_compile_dynamic=${TORCH_COMPILE_DYNAMIC}, enable_length_fixed_slice=${ENABLE_LENGTH_FIXED_SLICE}, fixed_slice_seconds=${FIXED_SLICE_SECONDS:-<none>}"
-echo "[INFO] Telemetry/stall-alert: enable_gpu_telemetry=${ENABLE_GPU_TELEMETRY}, gpu_telemetry_interval_sec=${GPU_TELEMETRY_INTERVAL_SEC}, stall_alert_ratio=${STALL_ALERT_RATIO}, max_wait_train_log_sec=${MAX_WAIT_TRAIN_LOG_SEC}"
+echo "[INFO] Length bucketing: enable_length_bucket=${ENABLE_LENGTH_BUCKET}, boundaries=${EFFECTIVE_LENGTH_BUCKET_BOUNDARIES_SEC:-<none>}"
+echo "[INFO] Telemetry/stall-alert: enable_gpu_telemetry=${ENABLE_GPU_TELEMETRY}, gpu_telemetry_interval_sec=${GPU_TELEMETRY_INTERVAL_SEC}, enable_host_telemetry=${ENABLE_HOST_TELEMETRY}, host_telemetry_interval_sec=${HOST_TELEMETRY_INTERVAL_SEC}, stall_alert_ratio=${STALL_ALERT_RATIO}, max_wait_train_log_sec=${MAX_WAIT_TRAIN_LOG_SEC}"
 echo "[INFO] Manifest durability: primary=${MANIFEST_PATH}, fallback=${MANIFEST_FALLBACK_PATH}, write_retries=${MANIFEST_WRITE_RETRIES}, retry_sleep_sec=${MANIFEST_WRITE_RETRY_SLEEP_SEC}"
 echo "[INFO] Driver log path: ${DRIVER_LOG_PATH:-<disabled>}"
 

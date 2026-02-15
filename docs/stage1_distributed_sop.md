@@ -34,6 +34,12 @@ Throughput-first defaults:
 - `MODEL_LOAD_DTYPE=auto` follows effective precision (`bf16` or `fp16`), which avoids FlashAttention2 dtype mismatch.
 - `SPEECH_ATTN_IMPL` and `TEXT_ATTN_IMPL` can be set independently; if omitted they inherit `ATTN_IMPL`.
 - `ENABLE_TF32=true` is only effective on cc >= 8.0 GPUs.
+- Default z0 convergence lane: `ATTN_IMPL=sdpa`, `ENABLE_TORCH_COMPILE=false`, `ENABLE_LENGTH_FIXED_SLICE=false`.
+- Optional diagnostics switches:
+  - `ENABLE_LENGTH_BUCKET=true|false`
+  - `LENGTH_BUCKET_BOUNDARIES_SEC=1.0,1.5,2.0,2.5,3.0`
+  - `ENABLE_HOST_TELEMETRY=true|false`
+  - `HOST_TELEMETRY_INTERVAL_SEC=2`
 
 ### 2.1 4090 Current Freeze Decision (2026-02 revalidation)
 
@@ -325,12 +331,12 @@ MATMUL_PRECISION=high \
 TS=$(date +%Y%m%d_%H%M%S)
 MODE=sweep \
 INCLUDE=localhost:0,1 \
-REPEATS=3 \
-MAX_STEPS=2000 \
+REPEATS=2 \
+MAX_STEPS=1200 \
 SWEEP_ZERO_STAGES=0 \
-SWEEP_MICRO_BATCHES=128,160,192 \
-SWEEP_NUM_WORKERS_LIST=4,6 \
-SWEEP_PREFETCH_LIST=2,4 \
+SWEEP_MICRO_BATCHES=160,192 \
+SWEEP_NUM_WORKERS_LIST=6,8 \
+SWEEP_PREFETCH_LIST=4 \
 SWEEP_LOG_EVERY=50 \
 TAIL_TIMING_POINTS=10 \
 HEARTBEAT_EVERY_SEC=30 \
@@ -354,12 +360,17 @@ ENABLE_TF32=true \
 MATMUL_PRECISION=high \
 ENABLE_TORCH_COMPILE=false \
 ENABLE_LENGTH_FIXED_SLICE=false \
+ENABLE_LENGTH_BUCKET=false \
+ENABLE_HOST_TELEMETRY=true \
+HOST_TELEMETRY_INTERVAL_SEC=2 \
+ENABLE_GPU_TELEMETRY=true \
+GPU_TELEMETRY_INTERVAL_SEC=1 \
 OUTPUT_ROOT=outputs/bench_2x4090_z0_converge_${TS} \
 DRIVER_LOG_PATH=outputs/bench_2x4090_z0_converge_${TS}/driver.log \
 ./scripts/run_stage1_ab_bench.sh
 ```
 
-4x4090：仅将 `INCLUDE` 改为 `localhost:0,1,2,3`，其余保持一致用于可比扩卡分析。
+4x4090：仅将 `INCLUDE` 改为 `localhost:0,1,2,3`，其余保持一致用于可比扩卡分析。若 `mb192,nw8` 稳定且无 OOM，再单点追加 `mb224,nw8,pf4`。
 
 #### 3.4.1.1 跑一次长时 leak 诊断（4090，z0_mb128_nw6_pf4，MAX_STEPS=10000，含主机内存采样）
 

@@ -56,6 +56,57 @@ def parse_float(value):
         return math.nan
 
 
+def percentile(values, q):
+    if not values:
+        return math.nan
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return float(ordered[0])
+    pos = (len(ordered) - 1) * (q / 100.0)
+    left = int(pos)
+    right = min(left + 1, len(ordered) - 1)
+    frac = pos - left
+    return float(ordered[left] * (1 - frac) + ordered[right] * frac)
+
+
+def parse_rank_spread_metrics(log_path: Path, tail_points: int):
+    pattern = re.compile(
+        r"TimingRank step=(\d+) rank=(\d+).*? step=([0-9]+(?:\.[0-9]+)?) iter=([0-9]+(?:\.[0-9]+)?)"
+    )
+    per_step = defaultdict(lambda: {"iter": [], "step": []})
+
+    with log_path.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            m = pattern.search(line)
+            if not m:
+                continue
+            step = int(m.group(1))
+            step_ms = float(m.group(3))
+            iter_ms = float(m.group(4))
+            per_step[step]["step"].append(step_ms)
+            per_step[step]["iter"].append(iter_ms)
+
+    if not per_step:
+        return None
+
+    tail_steps = sorted(per_step.keys())[-tail_points:]
+    iter_spreads = []
+    step_spreads = []
+    for step in tail_steps:
+        iter_vals = per_step[step]["iter"]
+        step_vals = per_step[step]["step"]
+        if len(iter_vals) >= 2:
+            iter_spreads.append(max(iter_vals) - min(iter_vals))
+        if len(step_vals) >= 2:
+            step_spreads.append(max(step_vals) - min(step_vals))
+
+    return {
+        "rank_iter_spread_p90_ms": percentile(iter_spreads, 90) if iter_spreads else math.nan,
+        "rank_step_spread_p90_ms": percentile(step_spreads, 90) if step_spreads else math.nan,
+        "rank_spread_points": len(iter_spreads),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Summarize stage1 benchmark logs.")
     parser.add_argument("--manifest", required=True, help="Path to run_manifest.tsv")
@@ -194,6 +245,28 @@ def main():
                 or (not math.isnan(step_ratio) and step_ratio > 3.0)
             )
 
+        rank_iter_spread_p90_ms = math.nan
+        rank_step_spread_p90_ms = math.nan
+        rank_spread_points = 0
+        rank_spread_log_source = ""
+        if str(row.get("timing_rank_scope", "")).strip().lower() == "all":
+            rank_metrics = None
+            rank_source = None
+            for candidate in [train_log, launcher_log]:
+                if not candidate.exists():
+                    continue
+                parsed = parse_rank_spread_metrics(candidate, tail_n)
+                if parsed is None:
+                    continue
+                if rank_metrics is None or parsed["rank_spread_points"] > rank_metrics["rank_spread_points"]:
+                    rank_metrics = parsed
+                    rank_source = candidate
+            if rank_metrics is not None:
+                rank_iter_spread_p90_ms = rank_metrics["rank_iter_spread_p90_ms"]
+                rank_step_spread_p90_ms = rank_metrics["rank_step_spread_p90_ms"]
+                rank_spread_points = rank_metrics["rank_spread_points"]
+                rank_spread_log_source = str(rank_source)
+
         per_run = {
             "mode": mode,
             "group": group,
@@ -235,6 +308,8 @@ def main():
             "git_dirty": row.get("git_dirty", ""),
             "gpu_telemetry_rows": row.get("gpu_telemetry_rows", ""),
             "gpu_telemetry_empty_flag": row.get("gpu_telemetry_empty_flag", ""),
+            "host_telemetry_rows": row.get("host_telemetry_rows", ""),
+            "host_telemetry_empty_flag": row.get("host_telemetry_empty_flag", ""),
             "log_every_steps": row.get("log_every_steps", ""),
             "validation_every_steps": row.get("validation_every_steps", ""),
             "checkpoint_every_steps": row.get("checkpoint_every_steps", ""),
@@ -260,6 +335,10 @@ def main():
             "iter_p90_over_p50": iter_ratio,
             "data_p90_over_p50": data_ratio,
             "step_p90_over_p50": step_ratio,
+            "rank_iter_spread_p90_ms": rank_iter_spread_p90_ms,
+            "rank_step_spread_p90_ms": rank_step_spread_p90_ms,
+            "rank_spread_points": rank_spread_points,
+            "rank_spread_log_source": rank_spread_log_source,
             "unstable_run_flag": unstable_flag,
             "tail_steps_per_sec": steps_per_sec_tail,
             "tail_samples_per_sec": samples_per_sec_tail,
@@ -330,10 +409,17 @@ def main():
         steps_vals = [r["tail_steps_per_sec"] for r in rows]
         samples_vals = [r["tail_samples_per_sec"] for r in rows if not math.isnan(r["tail_samples_per_sec"])]
         iter_ratio_vals = [r["iter_p90_over_p50"] for r in rows if not math.isnan(r["iter_p90_over_p50"])]
+        rank_iter_spread_vals = [r["rank_iter_spread_p90_ms"] for r in rows if not math.isnan(r["rank_iter_spread_p90_ms"])]
+        rank_step_spread_vals = [r["rank_step_spread_p90_ms"] for r in rows if not math.isnan(r["rank_step_spread_p90_ms"])]
+        rank_spread_point_vals = [parse_float(r.get("rank_spread_points", "")) for r in rows]
+        rank_spread_point_vals = [v for v in rank_spread_point_vals if not math.isnan(v)]
         unstable_runs = [r for r in rows if parse_boolish(r.get("unstable_run_flag", False))]
         telemetry_rows_vals = [parse_float(r.get("gpu_telemetry_rows", "")) for r in rows]
         telemetry_rows_vals = [v for v in telemetry_rows_vals if not math.isnan(v)]
         telemetry_empty_runs = [r for r in rows if parse_boolish(r.get("gpu_telemetry_empty_flag", False))]
+        host_telemetry_rows_vals = [parse_float(r.get("host_telemetry_rows", "")) for r in rows]
+        host_telemetry_rows_vals = [v for v in host_telemetry_rows_vals if not math.isnan(v)]
+        host_telemetry_empty_runs = [r for r in rows if parse_boolish(r.get("host_telemetry_empty_flag", False))]
         mean_iter = statistics.mean(vals)
         mean_iter_p90 = statistics.mean(vals_p90)
         std_iter = statistics.stdev(vals) if len(vals) > 1 else 0.0
@@ -379,6 +465,11 @@ def main():
                 "tail_mean_iter_p90_ms_max": max(vals_p90),
                 "iter_p90_over_p50_mean": statistics.mean(iter_ratio_vals) if iter_ratio_vals else math.nan,
                 "iter_p90_over_p50_std": statistics.stdev(iter_ratio_vals) if len(iter_ratio_vals) > 1 else 0.0,
+                "rank_iter_spread_p90_ms_mean": statistics.mean(rank_iter_spread_vals) if rank_iter_spread_vals else math.nan,
+                "rank_iter_spread_p90_ms_std": statistics.stdev(rank_iter_spread_vals) if len(rank_iter_spread_vals) > 1 else 0.0,
+                "rank_step_spread_p90_ms_mean": statistics.mean(rank_step_spread_vals) if rank_step_spread_vals else math.nan,
+                "rank_step_spread_p90_ms_std": statistics.stdev(rank_step_spread_vals) if len(rank_step_spread_vals) > 1 else 0.0,
+                "rank_spread_points_mean": statistics.mean(rank_spread_point_vals) if rank_spread_point_vals else math.nan,
                 "tail_steps_per_sec_mean": statistics.mean(steps_vals),
                 "tail_steps_per_sec_std": statistics.stdev(steps_vals) if len(steps_vals) > 1 else 0.0,
                 "tail_samples_per_sec_mean": statistics.mean(samples_vals) if samples_vals else math.nan,
@@ -388,6 +479,9 @@ def main():
                 "gpu_telemetry_rows_mean": statistics.mean(telemetry_rows_vals) if telemetry_rows_vals else math.nan,
                 "gpu_telemetry_empty_count": len(telemetry_empty_runs),
                 "gpu_telemetry_empty_ratio": (len(telemetry_empty_runs) / len(rows)) if rows else 0.0,
+                "host_telemetry_rows_mean": statistics.mean(host_telemetry_rows_vals) if host_telemetry_rows_vals else math.nan,
+                "host_telemetry_empty_count": len(host_telemetry_empty_runs),
+                "host_telemetry_empty_ratio": (len(host_telemetry_empty_runs) / len(rows)) if rows else 0.0,
                 "stability_score": stability_score,
                 "speedup_vs_baseline": baseline_mean / mean_iter if not math.isnan(baseline_mean) else math.nan,
             }
@@ -467,6 +561,8 @@ def main():
             "git_dirty": best_group["git_dirty"],
             "tail_mean_iter_p50_ms_mean": best_group["tail_mean_iter_p50_ms_mean"],
             "tail_mean_iter_p90_ms_mean": best_group["tail_mean_iter_p90_ms_mean"],
+            "rank_iter_spread_p90_ms_mean": best_group.get("rank_iter_spread_p90_ms_mean", math.nan),
+            "rank_step_spread_p90_ms_mean": best_group.get("rank_step_spread_p90_ms_mean", math.nan),
             "stability_score": best_group["stability_score"],
             "rank_by_stability": best_group["rank_by_stability"],
             "rank_balanced": best_group["rank_balanced"],
@@ -474,6 +570,8 @@ def main():
             "tail_samples_per_sec_mean": best_group["tail_samples_per_sec_mean"],
             "gpu_telemetry_rows_mean": best_group["gpu_telemetry_rows_mean"],
             "gpu_telemetry_empty_ratio": best_group["gpu_telemetry_empty_ratio"],
+            "host_telemetry_rows_mean": best_group.get("host_telemetry_rows_mean", math.nan),
+            "host_telemetry_empty_ratio": best_group.get("host_telemetry_empty_ratio", math.nan),
             "speedup_vs_baseline": best_group["speedup_vs_baseline"],
         }
 
@@ -521,6 +619,8 @@ def main():
             env_line("BEST_GIT_DIRTY", best_payload.get("git_dirty", "")),
             env_line("BEST_TAIL_MEAN_ITER_P50_MS", best_payload.get("tail_mean_iter_p50_ms_mean", "")),
             env_line("BEST_TAIL_MEAN_ITER_P90_MS", best_payload.get("tail_mean_iter_p90_ms_mean", "")),
+            env_line("BEST_RANK_ITER_SPREAD_P90_MS", best_payload.get("rank_iter_spread_p90_ms_mean", "")),
+            env_line("BEST_RANK_STEP_SPREAD_P90_MS", best_payload.get("rank_step_spread_p90_ms_mean", "")),
             env_line("BEST_STABILITY_SCORE", best_payload.get("stability_score", "")),
             env_line("BEST_RANK_BY_STABILITY", best_payload.get("rank_by_stability", "")),
             env_line("BEST_RANK_BALANCED", best_payload.get("rank_balanced", "")),
@@ -528,6 +628,8 @@ def main():
             env_line("BEST_TAIL_SAMPLES_PER_SEC", best_payload.get("tail_samples_per_sec_mean", "")),
             env_line("BEST_GPU_TELEMETRY_ROWS_MEAN", best_payload.get("gpu_telemetry_rows_mean", "")),
             env_line("BEST_GPU_TELEMETRY_EMPTY_RATIO", best_payload.get("gpu_telemetry_empty_ratio", "")),
+            env_line("BEST_HOST_TELEMETRY_ROWS_MEAN", best_payload.get("host_telemetry_rows_mean", "")),
+            env_line("BEST_HOST_TELEMETRY_EMPTY_RATIO", best_payload.get("host_telemetry_empty_ratio", "")),
             env_line("BEST_SPEEDUP_VS_BASELINE", best_payload.get("speedup_vs_baseline", "")),
         ]
         best_env.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
@@ -585,6 +687,10 @@ def main():
         lines.append(f"- git_dirty: `{best_payload['git_dirty']}`")
         lines.append(f"- tail_mean_iter_p50_ms: `{best_payload['tail_mean_iter_p50_ms_mean']:.4f}`")
         lines.append(f"- tail_mean_iter_p90_ms: `{best_payload['tail_mean_iter_p90_ms_mean']:.4f}`")
+        if not math.isnan(best_payload.get("rank_iter_spread_p90_ms_mean", math.nan)):
+            lines.append(f"- rank_iter_spread_p90_ms: `{best_payload['rank_iter_spread_p90_ms_mean']:.4f}`")
+        if not math.isnan(best_payload.get("rank_step_spread_p90_ms_mean", math.nan)):
+            lines.append(f"- rank_step_spread_p90_ms: `{best_payload['rank_step_spread_p90_ms_mean']:.4f}`")
         lines.append(f"- stability_score: `{best_payload['stability_score']:.4f}`")
         lines.append(f"- rank_by_stability: `{best_payload['rank_by_stability']}`")
         lines.append(f"- rank_balanced: `{best_payload['rank_balanced']}`")
@@ -593,6 +699,10 @@ def main():
             lines.append(f"- gpu_telemetry_rows_mean: `{best_payload['gpu_telemetry_rows_mean']:.2f}`")
         if not math.isnan(best_payload.get("gpu_telemetry_empty_ratio", math.nan)):
             lines.append(f"- gpu_telemetry_empty_ratio: `{best_payload['gpu_telemetry_empty_ratio']:.4f}`")
+        if not math.isnan(best_payload.get("host_telemetry_rows_mean", math.nan)):
+            lines.append(f"- host_telemetry_rows_mean: `{best_payload['host_telemetry_rows_mean']:.2f}`")
+        if not math.isnan(best_payload.get("host_telemetry_empty_ratio", math.nan)):
+            lines.append(f"- host_telemetry_empty_ratio: `{best_payload['host_telemetry_empty_ratio']:.4f}`")
         if not math.isnan(best_payload.get("tail_samples_per_sec_mean", math.nan)):
             lines.append(f"- tail_samples_per_sec: `{best_payload['tail_samples_per_sec_mean']:.4f}`")
         lines.append(f"- best_config JSON: `{best_json}`")
@@ -615,6 +725,30 @@ def main():
             )
     else:
         lines.append("No successful runs found.")
+
+    rank_spread_rows = [
+        row
+        for row in group_rows
+        if not math.isnan(row.get("rank_iter_spread_p90_ms_mean", math.nan))
+    ]
+    if rank_spread_rows:
+        ranked_by_rank_spread = sorted(rank_spread_rows, key=lambda x: x["rank_iter_spread_p90_ms_mean"])
+        lines.append("")
+        lines.append("## Rank Imbalance (timing_rank_scope=all)")
+        lines.append("")
+        lines.append("- `tail_mean_iter_*` reflects throughput tail (single-rank view).")
+        lines.append("- `rank_*_spread_p90_ms` reflects per-step cross-rank imbalance tail.")
+        lines.append("")
+        lines.append("| group | rank_iter_spread_p90_ms_mean | rank_step_spread_p90_ms_mean | rank_spread_points_mean |")
+        lines.append("|---|---:|---:|---:|")
+        for row in ranked_by_rank_spread[:10]:
+            iter_spread = row.get("rank_iter_spread_p90_ms_mean", math.nan)
+            step_spread = row.get("rank_step_spread_p90_ms_mean", math.nan)
+            points = row.get("rank_spread_points_mean", math.nan)
+            iter_str = "nan" if math.isnan(iter_spread) else f"{iter_spread:.4f}"
+            step_str = "nan" if math.isnan(step_spread) else f"{step_spread:.4f}"
+            points_str = "nan" if math.isnan(points) else f"{points:.2f}"
+            lines.append(f"| {row['group']} | {iter_str} | {step_str} | {points_str} |")
 
     if ranked_by_stability:
         lines.append("")
