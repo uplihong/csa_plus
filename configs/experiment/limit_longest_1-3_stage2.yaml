@@ -6,7 +6,7 @@ experiment_output_dir: outputs/${experiment_name}/${now:%Y-%m-%d}/${now:%H-%M}
 deepspeed_config_yaml:
   gradient_accumulation_steps: 1
   train_micro_batch_size_per_gpu: 128
-  wall_clock_breakdown: true
+  wall_clock_breakdown: false
   flops_profiler:
     enabled: false
     profile_step: 5
@@ -21,7 +21,8 @@ deepspeed_config_yaml:
 
 train:
   seed: 123456
-  deterministic: true
+  deterministic: false
+  # Variable-length audio + random slice is slower with cudnn benchmark search.
   cudnn_benchmark: false
   min_max_audio_second: [1.0, 3.0]
   # 训练好的CSA模型，在此基础上进一步cut audio训练
@@ -64,7 +65,7 @@ hydra:
 #   '++train.checkpoint_every_steps=500' \
 #   '++train.pretrained_model_checkpoint=/code/data/weights/csa/ckpt_epoch_8.pth' \
 #   '++dataset.root_dir=/code/data/LibriSpeech/LibriSpeech' \
-#   '++speech_encoder.pretrained_path=/code/data/weights/wav2vec2-base' \
-#   '++text_encoder.pretrained_path=/code/data/weights/bert-base-uncased' \
+#   '++model.speech_encoder.pretrained_path=/code/data/weights/wav2vec2-base' \
+#   '++model.text_encoder.pretrained_path=/code/data/weights/bert-base-uncased' \
 #   'deepspeed_config_yaml.train_micro_batch_size_per_gpu=128' \
 #   '+experiment=limit_longest_1-3_stage2'

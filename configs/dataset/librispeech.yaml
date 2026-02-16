@@ -4,3 +4,5 @@ train_split: "train"
 max_durations: null
 use_trim: true
 target_sample_rate: 16000
+manifest_path: null
+offline_trimmed: false
