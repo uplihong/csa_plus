@@ -53,11 +53,13 @@ python scripts/preprocess_librispeech_16k.py \
 - NCCL + CUDA driver healthy
 - no heavy concurrent CPU tasks during run
 - enough disk space for `OUTPUT_ROOT`
+- if `deepspeed` is not in current shell `PATH`, set `CONDA_ENV` (e.g. `CONDA_ENV=csref_2`)
 
 ## 3. Mainline Command Templates
 
 All templates use:
 - rank0 timing for lower overhead (`TIMING_RANK_SCOPE=rank0`)
+- ETA logging enabled with low-overhead mode (`ETA_DISTRIBUTED_MODE=rank0`)
 - GPU telemetry enabled
 - host telemetry optional (`ENABLE_HOST_TELEMETRY`)
 
@@ -86,12 +88,16 @@ FAIL_TAIL_LINES=120 \
 RESUME_RUNS=true \
 SWEEP_VALIDATION_EVERY=1000000 \
 SWEEP_CHECKPOINT_EVERY=1000000 \
+CONDA_ENV=csref_2 \
 DATASET_ROOT=data/LibriSpeech/LibriSpeech_16k_trim \
 DATASET_MANIFEST_PATH=data/LibriSpeech/LibriSpeech_16k_trim/manifest_16k_trim.tsv \
 DATASET_USE_TRIM=false \
 DATASET_OFFLINE_TRIMMED=true \
 ENABLE_CUDA_SYNC_TIMING=false \
 TIMING_RANK_SCOPE=rank0 \
+ENABLE_ETA_LOGGING=true \
+ETA_DISTRIBUTED_MODE=rank0 \
+ETA_MIN_SAMPLES=10 \
 PRECISION_MODE=auto \
 ATTN_IMPL=auto \
 MODEL_LOAD_DTYPE=auto \
@@ -133,12 +139,16 @@ FAIL_TAIL_LINES=120 \
 RESUME_RUNS=true \
 SWEEP_VALIDATION_EVERY=1000000 \
 SWEEP_CHECKPOINT_EVERY=1000000 \
+CONDA_ENV=csref_2 \
 DATASET_ROOT=data/LibriSpeech/LibriSpeech_16k_trim \
 DATASET_MANIFEST_PATH=data/LibriSpeech/LibriSpeech_16k_trim/manifest_16k_trim.tsv \
 DATASET_USE_TRIM=false \
 DATASET_OFFLINE_TRIMMED=true \
 ENABLE_CUDA_SYNC_TIMING=false \
 TIMING_RANK_SCOPE=rank0 \
+ENABLE_ETA_LOGGING=true \
+ETA_DISTRIBUTED_MODE=rank0 \
+ETA_MIN_SAMPLES=10 \
 PRECISION_MODE=auto \
 ATTN_IMPL=auto \
 MODEL_LOAD_DTYPE=auto \
@@ -177,11 +187,15 @@ SWEEP_LOG_EVERY=50 \
 TAIL_TIMING_POINTS=10 \
 HEARTBEAT_EVERY_SEC=30 \
 RUN_TIMEOUT_SEC=1800 \
+CONDA_ENV=csref_2 \
 DATASET_ROOT=data/LibriSpeech/LibriSpeech_16k_trim \
 DATASET_MANIFEST_PATH=data/LibriSpeech/LibriSpeech_16k_trim/manifest_16k_trim.tsv \
 DATASET_USE_TRIM=false \
 DATASET_OFFLINE_TRIMMED=true \
 TIMING_RANK_SCOPE=rank0 \
+ENABLE_ETA_LOGGING=true \
+ETA_DISTRIBUTED_MODE=rank0 \
+ETA_MIN_SAMPLES=10 \
 PRECISION_MODE=auto \
 ATTN_IMPL=auto \
 MODEL_LOAD_DTYPE=auto \
@@ -196,13 +210,32 @@ OUTPUT_ROOT="${OUT}" \
 ./scripts/run_stage1_ab_bench.sh 2>&1 | tee "${OUT}/driver.log"
 ```
 
+### 3.4 Low-overhead distributed ETA (recommended)
+
+Default (lowest overhead):
+
+- `ENABLE_ETA_LOGGING=true`
+- `ETA_DISTRIBUTED_MODE=rank0`
+- `ETA_MIN_SAMPLES=10`
+
+Conservative multi-rank estimate:
+
+- switch `ETA_DISTRIBUTED_MODE=global_max`
+- this adds low-frequency scalar `all_reduce(max)` only at log steps
+
+Single-machine compatibility fallback (when distributed NCCL P2P is unstable):
+
+- add `NCCL_P2P_DISABLE=1` for the benchmark command
+- keep this as host-specific override, not a default policy
+
 ## 4. Output Artifacts
 
 Each run/sweep writes to `OUTPUT_ROOT`.
 
 Core files:
-- `run_manifest.tsv`: run-level status and last metrics
+- `run_manifest.tsv`: run-level status and last metrics (including `last_eta_*`)
 - `timing_points.csv`: parsed timing windows
+- `eta_points.csv`: parsed ETA points from `TimingETA`
 - `per_run_metrics.csv`: aggregated per-run metrics
 - `group_summary.csv`: group-level aggregation and ranking fields
 - `summary.md` / `summary.json`: human/machine summaries
@@ -255,6 +288,21 @@ Heuristics:
 
 - Treat as infra issue first.
 - Re-run on healthy node/storage before comparing code-level performance.
+
+### 6.5 `deepspeed: No such file or directory`
+
+- Root cause: `deepspeed` not in current shell path.
+- Action:
+  - set `CONDA_ENV=csref_2` (or your training env)
+  - rerun command without changing benchmark configs
+
+### 6.6 distributed stall/hang on this host (NCCL P2P path)
+
+- Symptom:
+  - multi-GPU job stalls early or heartbeat cannot observe normal step progress.
+- Action:
+  - rerun with `NCCL_P2P_DISABLE=1`
+  - keep this setting host-scoped; do not force as global default
 
 ## 7. Optional Diagnostic Tool
 

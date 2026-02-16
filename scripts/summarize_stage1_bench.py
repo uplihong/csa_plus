@@ -126,9 +126,14 @@ def main():
         for k in TIMING_KEYS
     }
     step_pattern = re.compile(r"Step\s+([0-9]+):")
+    eta_pattern = re.compile(
+        r"TimingETA step=(\d+) remain_steps=(\d+) eta_sec=([0-9]+(?:\.[0-9]+)?) "
+        r"eta_hms=([0-9]+:[0-9]{2}:[0-9]{2}) mode=([a-zA-Z0-9_]+)"
+    )
 
     per_run_rows = []
     timing_rows = []
+    eta_rows = []
     skipped_rows = []
 
     with manifest_path.open("r", encoding="utf-8") as f:
@@ -170,12 +175,24 @@ def main():
             continue
 
         points = []
+        eta_points = []
         last_step = None
         with train_log.open("r", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 m_step = step_pattern.search(line)
                 if m_step:
                     last_step = int(m_step.group(1))
+                m_eta = eta_pattern.search(line)
+                if m_eta:
+                    eta_points.append(
+                        {
+                            "step": int(m_eta.group(1)),
+                            "remain_steps": int(m_eta.group(2)),
+                            "eta_sec": float(m_eta.group(3)),
+                            "eta_hms": str(m_eta.group(4)),
+                            "eta_mode": str(m_eta.group(5)),
+                        }
+                    )
                 if "Timing(window=" not in line:
                     continue
                 values = {}
@@ -202,6 +219,9 @@ def main():
                 }
             )
             continue
+
+        eta_first = eta_points[0] if eta_points else None
+        eta_last = eta_points[-1] if eta_points else None
 
         iter_values = [p["iter_ms_p50"] for p in points]
         iter_p90_values = [p["iter_ms_p90"] for p in points]
@@ -313,8 +333,21 @@ def main():
             "log_every_steps": row.get("log_every_steps", ""),
             "validation_every_steps": row.get("validation_every_steps", ""),
             "checkpoint_every_steps": row.get("checkpoint_every_steps", ""),
+            "last_eta_step": row.get("last_eta_step", ""),
+            "last_eta_remaining_steps": row.get("last_eta_remaining_steps", ""),
+            "last_eta_sec": row.get("last_eta_sec", ""),
+            "last_eta_hms": row.get("last_eta_hms", ""),
+            "last_eta_mode": row.get("last_eta_mode", ""),
             "timing_points": len(points),
             "tail_points_used": tail_n,
+            "eta_points": len(eta_points),
+            "eta_first_step": eta_first["step"] if eta_first else math.nan,
+            "eta_first_sec": eta_first["eta_sec"] if eta_first else math.nan,
+            "eta_first_hms": eta_first["eta_hms"] if eta_first else "",
+            "eta_last_step": eta_last["step"] if eta_last else math.nan,
+            "eta_last_sec": eta_last["eta_sec"] if eta_last else math.nan,
+            "eta_last_hms": eta_last["eta_hms"] if eta_last else "",
+            "eta_mode_effective": eta_last["eta_mode"] if eta_last else "",
             "last_step": last_point["step"],
             "last_iter_p50_ms": last_point["iter_ms_p50"],
             "last_iter_p90_ms": last_point["iter_ms_p90"],
@@ -368,12 +401,29 @@ def main():
                     "train_log": str(train_log),
                 }
             )
+        for idx, point in enumerate(eta_points, start=1):
+            eta_rows.append(
+                {
+                    "mode": mode,
+                    "group": group,
+                    "repeat": repeat,
+                    "index": idx,
+                    "step": point["step"],
+                    "remain_steps": point["remain_steps"],
+                    "eta_sec": point["eta_sec"],
+                    "eta_hms": point["eta_hms"],
+                    "eta_mode": point["eta_mode"],
+                    "train_log": str(train_log),
+                }
+            )
 
     per_run_rows.sort(key=lambda x: (x["mode"], x["group"], x["repeat"]))
     timing_rows.sort(key=lambda x: (x["mode"], x["group"], x["repeat"], x["index"]))
+    eta_rows.sort(key=lambda x: (x["mode"], x["group"], x["repeat"], x["index"]))
 
     per_run_csv = output_root / "per_run_metrics.csv"
     timing_csv = output_root / "timing_points.csv"
+    eta_csv = output_root / "eta_points.csv"
     group_csv = output_root / "group_summary.csv"
     ranked_csv = output_root / "ranked_groups.csv"
     summary_json = output_root / "summary.json"
@@ -393,6 +443,11 @@ def main():
             writer = csv.DictWriter(f, fieldnames=list(timing_rows[0].keys()))
             writer.writeheader()
             writer.writerows(timing_rows)
+    if eta_rows:
+        with eta_csv.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(eta_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(eta_rows)
 
     grouped = defaultdict(list)
     for row in per_run_rows:
@@ -662,6 +717,8 @@ def main():
     lines.append(f"- Output root: `{output_root}`")
     lines.append(f"- Tail timing points used per run: `{tail_points}`")
     lines.append(f"- Baseline group for speedup: `{baseline_group}`")
+    if eta_rows:
+        lines.append(f"- ETA points CSV: `{eta_csv}`")
     lines.append("")
     if best_payload is not None:
         lines.append("## Best Config")
@@ -709,6 +766,28 @@ def main():
         lines.append(f"- best_config ENV: `{best_env}`")
         lines.append(f"- best overrides: `{best_overrides}`")
         lines.append("")
+
+    lines.append("## ETA Overview")
+    lines.append("")
+    if per_run_rows:
+        eta_available_runs = [row for row in per_run_rows if int(row.get("eta_points", 0)) > 0]
+        lines.append(f"- Runs with ETA points: `{len(eta_available_runs)}/{len(per_run_rows)}`")
+        lines.append(f"- Total ETA points: `{len(eta_rows)}`")
+        lines.append("")
+        if eta_available_runs:
+            lines.append("| mode | group | repeat | eta_points | eta_mode_effective | eta_last_step | eta_last_sec | eta_last_hms |")
+            lines.append("|---|---|---:|---:|---|---:|---:|---|")
+            for row in eta_available_runs:
+                eta_last_sec = row.get("eta_last_sec", math.nan)
+                eta_last_sec_str = "nan" if math.isnan(eta_last_sec) else f"{eta_last_sec:.1f}"
+                eta_last_step = row.get("eta_last_step", math.nan)
+                eta_last_step_str = "nan" if math.isnan(eta_last_step) else f"{int(eta_last_step)}"
+                lines.append(
+                    f"| {row['mode']} | {row['group']} | {row['repeat']} | {row['eta_points']} | {row.get('eta_mode_effective', '')} | {eta_last_step_str} | {eta_last_sec_str} | {row.get('eta_last_hms', '')} |"
+                )
+    else:
+        lines.append("No successful runs found.")
+    lines.append("")
 
     lines.append("## Group Summary")
     lines.append("")
@@ -772,6 +851,8 @@ def main():
 
     print(f"[INFO] Wrote: {per_run_csv}")
     print(f"[INFO] Wrote: {timing_csv}")
+    if eta_rows:
+        print(f"[INFO] Wrote: {eta_csv}")
     print(f"[INFO] Wrote: {group_csv}")
     print(f"[INFO] Wrote: {ranked_csv}")
     print(f"[INFO] Wrote: {summary_json}")

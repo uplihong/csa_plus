@@ -11,6 +11,7 @@ set -euo pipefail
 # - run_manifest.tsv
 # - per_run_metrics.csv
 # - timing_points.csv
+# - eta_points.csv
 # - group_summary.csv
 # - ranked_groups.csv
 # - best_config.json
@@ -52,6 +53,9 @@ SPEECH_MODEL_PATH="${SPEECH_MODEL_PATH:-data/weights/wav2vec2-base}"
 TEXT_MODEL_PATH="${TEXT_MODEL_PATH:-data/weights/bert-base-uncased}"
 ENABLE_CUDA_SYNC_TIMING="${ENABLE_CUDA_SYNC_TIMING:-false}"
 TIMING_RANK_SCOPE="${TIMING_RANK_SCOPE:-rank0}" # rank0 | all
+ENABLE_ETA_LOGGING="${ENABLE_ETA_LOGGING:-true}"
+ETA_DISTRIBUTED_MODE="${ETA_DISTRIBUTED_MODE:-rank0}" # rank0 | global_max
+ETA_MIN_SAMPLES="${ETA_MIN_SAMPLES:-10}"
 PRECISION_MODE="${PRECISION_MODE:-auto}"        # auto | bf16 | fp16
 ATTN_IMPL="${ATTN_IMPL:-auto}"                  # auto | eager | sdpa | flash_attention_2
 SPEECH_ATTN_IMPL="${SPEECH_ATTN_IMPL:-${ATTN_IMPL}}"
@@ -115,12 +119,13 @@ mkdir -p "${OUTPUT_ROOT}"
 MANIFEST_PATH="${OUTPUT_ROOT}/run_manifest.tsv"
 MANIFEST_FALLBACK_PATH="${MANIFEST_FALLBACK_PATH:-/tmp/csa_plus_run_manifest_fallback_${TIMESTAMP}_$$.tsv}"
 
-MANIFEST_HEADER=$'mode\tgroup\trepeat\tstatus\texit_code\tduration_sec\tlast_step\tlast_iter_ms_p50\titer_p90_over_p50\tdata_p90_over_p50\tstep_p90_over_p50\tunstable_run_flag\tport\trun_dir\tlauncher_log\ttrain_log\tzero_stage\tmicro_batch\tworld_size\tglobal_batch\tdeterministic\tcudnn_benchmark\twall_clock_breakdown\tlog_every_steps\tvalidation_every_steps\tcheckpoint_every_steps\tnum_workers\tprefetch_factor\tdataset_manifest_path\tdataset_use_trim\tdataset_offline_trimmed\tenable_cuda_sync_timing\ttiming_rank_scope\tprecision_mode_req\tprecision_mode_effective\tmodel_load_dtype_effective\tattn_impl_effective\tspeech_attn_impl_effective\ttext_attn_impl_effective\ttorch_compile_enabled\ttf32_enabled\tgpu_name\tgpu_cc\tgpu_uuid_list\tgpu_power_limit_w\tpcie_gen\tdriver_version\tgit_commit_hash\tgit_commit_short\tgit_branch\tgit_dirty\tgpu_telemetry_rows\tgpu_telemetry_empty_flag\thost_telemetry_rows\thost_telemetry_empty_flag'
+MANIFEST_HEADER=$'mode\tgroup\trepeat\tstatus\texit_code\tduration_sec\tlast_step\tlast_iter_ms_p50\tlast_eta_step\tlast_eta_remaining_steps\tlast_eta_sec\tlast_eta_hms\tlast_eta_mode\titer_p90_over_p50\tdata_p90_over_p50\tstep_p90_over_p50\tunstable_run_flag\tport\trun_dir\tlauncher_log\ttrain_log\tzero_stage\tmicro_batch\tworld_size\tglobal_batch\tdeterministic\tcudnn_benchmark\twall_clock_breakdown\tlog_every_steps\tvalidation_every_steps\tcheckpoint_every_steps\tnum_workers\tprefetch_factor\tdataset_manifest_path\tdataset_use_trim\tdataset_offline_trimmed\tenable_cuda_sync_timing\ttiming_rank_scope\tprecision_mode_req\tprecision_mode_effective\tmodel_load_dtype_effective\tattn_impl_effective\tspeech_attn_impl_effective\ttext_attn_impl_effective\ttorch_compile_enabled\ttf32_enabled\tgpu_name\tgpu_cc\tgpu_uuid_list\tgpu_power_limit_w\tpcie_gen\tdriver_version\tgit_commit_hash\tgit_commit_short\tgit_branch\tgit_dirty\tgpu_telemetry_rows\tgpu_telemetry_empty_flag\thost_telemetry_rows\thost_telemetry_empty_flag'
 declare -A COMPLETED_RUNS
 
 PYTHON_CMD=(python)
 if [[ -n "${CONDA_ENV}" ]]; then
-  PYTHON_CMD=(conda run -n "${CONDA_ENV}" python)
+  # Keep parser helper outputs visible when invoked from shell substitutions.
+  PYTHON_CMD=(conda run --no-capture-output -n "${CONDA_ENV}" python)
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -215,6 +220,14 @@ require_timing_rank_scope() {
   fi
 }
 
+require_eta_distributed_mode() {
+  local value="$1"
+  if [[ "${value}" != "rank0" && "${value}" != "global_max" ]]; then
+    echo "ETA_DISTRIBUTED_MODE must be one of: rank0, global_max. got: ${value}" >&2
+    exit 1
+  fi
+}
+
 require_precision_mode() {
   local value="$1"
   if [[ "${value}" != "auto" && "${value}" != "bf16" && "${value}" != "fp16" ]]; then
@@ -302,6 +315,23 @@ normalize_positive_float_csv() {
   echo "${normalized[*]}"
 }
 
+format_seconds_to_hms() {
+  local seconds="$1"
+  if [[ -z "${seconds}" ]]; then
+    echo ""
+    return 0
+  fi
+  awk -v s="${seconds}" 'BEGIN{
+    if (s == "") { print ""; exit 0 }
+    if (s < 0) { s = 0 }
+    total = int(s + 0.5)
+    h = int(total / 3600)
+    m = int((total % 3600) / 60)
+    sec = total % 60
+    printf "%02d:%02d:%02d", h, m, sec
+  }'
+}
+
 require_pos_int "REPEATS" "${REPEATS}"
 require_pos_int "MASTER_PORT_BASE" "${MASTER_PORT_BASE}"
 require_pos_int "MAX_STEPS" "${MAX_STEPS}"
@@ -320,6 +350,7 @@ require_bool "SWEEP_WALL_CLOCK_BREAKDOWN" "${SWEEP_WALL_CLOCK_BREAKDOWN}"
 require_bool "DATASET_USE_TRIM" "${DATASET_USE_TRIM}"
 require_bool "DATASET_OFFLINE_TRIMMED" "${DATASET_OFFLINE_TRIMMED}"
 require_bool "ENABLE_CUDA_SYNC_TIMING" "${ENABLE_CUDA_SYNC_TIMING}"
+require_bool "ENABLE_ETA_LOGGING" "${ENABLE_ETA_LOGGING}"
 require_bool "FAILURE_DUMP_TAIL" "${FAILURE_DUMP_TAIL}"
 require_bool "RESUME_RUNS" "${RESUME_RUNS}"
 require_bool "ENABLE_TORCH_COMPILE" "${ENABLE_TORCH_COMPILE}"
@@ -330,6 +361,7 @@ require_bool "ENABLE_GPU_TELEMETRY" "${ENABLE_GPU_TELEMETRY}"
 require_bool "ENABLE_HOST_TELEMETRY" "${ENABLE_HOST_TELEMETRY}"
 require_bool "ENABLE_TF32" "${ENABLE_TF32}"
 require_timing_rank_scope "${TIMING_RANK_SCOPE}"
+require_eta_distributed_mode "${ETA_DISTRIBUTED_MODE}"
 require_precision_mode "${PRECISION_MODE}"
 require_attn_impl "${ATTN_IMPL}"
 require_attn_impl "${SPEECH_ATTN_IMPL}"
@@ -339,6 +371,7 @@ require_matmul_precision "${MATMUL_PRECISION}"
 require_nonneg_int "RUN_TIMEOUT_SEC" "${RUN_TIMEOUT_SEC}"
 require_nonneg_int "HEARTBEAT_EVERY_SEC" "${HEARTBEAT_EVERY_SEC}"
 require_nonneg_int "MAX_WAIT_TRAIN_LOG_SEC" "${MAX_WAIT_TRAIN_LOG_SEC}"
+require_pos_int "ETA_MIN_SAMPLES" "${ETA_MIN_SAMPLES}"
 require_pos_int "GPU_TELEMETRY_INTERVAL_SEC" "${GPU_TELEMETRY_INTERVAL_SEC}"
 require_pos_int "HOST_TELEMETRY_INTERVAL_SEC" "${HOST_TELEMETRY_INTERVAL_SEC}"
 require_pos_int "FAIL_TAIL_LINES" "${FAIL_TAIL_LINES}"
@@ -963,6 +996,35 @@ print(f"{iter_ratio}\t{data_ratio}\t{step_ratio}\t{unstable}")
 PY
 }
 
+extract_last_eta() {
+  local log_path="$1"
+  if [[ ! -f "${log_path}" ]]; then
+    echo -e "\t\t\t\t"
+    return 0
+  fi
+  "${PYTHON_CMD[@]}" - "${log_path}" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+pattern = re.compile(
+    r"TimingETA step=(\d+) remain_steps=(\d+) eta_sec=([0-9]+(?:\.[0-9]+)?) "
+    r"eta_hms=([0-9]+:[0-9]{2}:[0-9]{2}) mode=([a-zA-Z0-9_]+)"
+)
+last = None
+with open(path, "r", encoding="utf-8", errors="ignore") as f:
+    for line in f:
+        m = pattern.search(line)
+        if m:
+            last = m
+
+if last is None:
+    print("\t\t\t\t")
+else:
+    print("\t".join(last.groups()))
+PY
+}
+
 count_telemetry_rows() {
   local telemetry_csv="$1"
   if [[ ! -f "${telemetry_csv}" ]]; then
@@ -1026,9 +1088,28 @@ start_heartbeat() {
       train_log_missing_sec=0
       local step=""
       local iter_ms=""
+      local eta_step=""
+      local eta_remaining_steps=""
+      local eta_sec=""
+      local eta_hms=""
+      local eta_mode=""
       step="$(extract_last_step "${train_log}")"
       iter_ms="$(extract_last_iter_ms "${train_log}")"
-      echo "[INFO] heartbeat ${group} r${repeat}: last_step=${step:-N/A}, iter_ms_p50=${iter_ms:-N/A}" >&2
+      IFS=$'\t' read -r eta_step eta_remaining_steps eta_sec eta_hms eta_mode <<< "$(extract_last_eta "${train_log}")"
+      if [[ -z "${eta_hms}" ]]; then
+        if [[ -n "${step}" && "${step}" =~ ^[0-9]+$ && -n "${iter_ms}" && "${iter_ms}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+          local rem_steps=$((MAX_STEPS - step))
+          if [[ "${rem_steps}" -lt 0 ]]; then
+            rem_steps=0
+          fi
+          eta_remaining_steps="${rem_steps}"
+          eta_sec="$(awk -v rem="${rem_steps}" -v iter="${iter_ms}" 'BEGIN{if (iter > 0 && rem >= 0) printf "%.1f", (rem * iter) / 1000.0}')"
+          eta_hms="$(format_seconds_to_hms "${eta_sec}")"
+          eta_mode="fallback_local"
+          eta_step="${step}"
+        fi
+      fi
+      echo "[INFO] heartbeat ${group} r${repeat}: last_step=${step:-N/A}, iter_ms_p50=${iter_ms:-N/A}, eta=${eta_hms:-N/A}(${eta_sec:-N/A}s), eta_mode=${eta_mode:-N/A}, remain_steps=${eta_remaining_steps:-N/A}" >&2
 
       if [[ -n "${step}" && -n "${prev_step}" && "${step}" == "${prev_step}" ]]; then
         stagnant_count=$((stagnant_count + 1))
@@ -1409,6 +1490,9 @@ run_case() {
     "++train.data.use_length_bucket=${ENABLE_LENGTH_BUCKET}"
     "++train.enable_cuda_sync_timing=${ENABLE_CUDA_SYNC_TIMING}"
     "++train.timing_rank_scope=${TIMING_RANK_SCOPE}"
+    "++train.enable_eta_logging=${ENABLE_ETA_LOGGING}"
+    "++train.eta_distributed_mode=${ETA_DISTRIBUTED_MODE}"
+    "++train.eta_min_samples=${ETA_MIN_SAMPLES}"
     "++train.enable_torch_compile=${ENABLE_TORCH_COMPILE}"
     "++train.torch_compile_mode=${TORCH_COMPILE_MODE}"
     "++train.torch_compile_dynamic=${TORCH_COMPILE_DYNAMIC}"
@@ -1447,6 +1531,11 @@ run_case() {
   local duration_sec=0
   local last_step=""
   local last_iter_ms_p50=""
+  local last_eta_step=""
+  local last_eta_remaining_steps=""
+  local last_eta_sec=""
+  local last_eta_hms=""
+  local last_eta_mode=""
   local iter_p90_over_p50=""
   local data_p90_over_p50=""
   local step_p90_over_p50=""
@@ -1510,6 +1599,9 @@ run_case() {
     echo "enable_host_telemetry=${ENABLE_HOST_TELEMETRY}"
     echo "host_telemetry_interval_sec=${HOST_TELEMETRY_INTERVAL_SEC}"
     echo "host_telemetry_csv=${host_telemetry_csv}"
+    echo "enable_eta_logging=${ENABLE_ETA_LOGGING}"
+    echo "eta_distributed_mode=${ETA_DISTRIBUTED_MODE}"
+    echo "eta_min_samples=${ETA_MIN_SAMPLES}"
     echo "stall_alert_ratio=${STALL_ALERT_RATIO}"
     echo "enable_length_fixed_slice=${ENABLE_LENGTH_FIXED_SLICE}"
     echo "fixed_slice_seconds=${FIXED_SLICE_SECONDS}"
@@ -1587,6 +1679,7 @@ run_case() {
   duration_sec=$((run_end_epoch - run_start_epoch))
   last_step="$(extract_last_step "${train_log}")"
   last_iter_ms_p50="$(extract_last_iter_ms "${train_log}")"
+  IFS=$'\t' read -r last_eta_step last_eta_remaining_steps last_eta_sec last_eta_hms last_eta_mode <<< "$(extract_last_eta "${train_log}")"
   IFS=$'\t' read -r iter_p90_over_p50 data_p90_over_p50 step_p90_over_p50 unstable_run_flag <<< "$(extract_last_timing_ratios "${train_log}")"
   if [[ -z "${unstable_run_flag}" ]]; then
     unstable_run_flag="false"
@@ -1617,7 +1710,7 @@ run_case() {
   fi
 
   local manifest_row=(
-    "${mode_name}" "${group}" "${repeat}" "${status}" "${exit_code}" "${duration_sec}" "${last_step}" "${last_iter_ms_p50}" "${iter_p90_over_p50}" "${data_p90_over_p50}" "${step_p90_over_p50}" "${unstable_run_flag}" "${port}" "${run_dir}" "${launcher_log}" "${train_log}"
+    "${mode_name}" "${group}" "${repeat}" "${status}" "${exit_code}" "${duration_sec}" "${last_step}" "${last_iter_ms_p50}" "${last_eta_step}" "${last_eta_remaining_steps}" "${last_eta_sec}" "${last_eta_hms}" "${last_eta_mode}" "${iter_p90_over_p50}" "${data_p90_over_p50}" "${step_p90_over_p50}" "${unstable_run_flag}" "${port}" "${run_dir}" "${launcher_log}" "${train_log}"
     "${zero_stage}" "${micro_batch}" "${WORLD_SIZE}" "${global_batch}"
     "${deterministic}" "${cudnn_benchmark}" "${wall_clock_breakdown}"
     "${log_every}" "${val_every}" "${ckpt_every}" "${num_workers}" "${prefetch_factor}"
@@ -1649,7 +1742,7 @@ run_case() {
     fi
   else
     COMPLETED_RUNS["${run_key}"]=1
-    echo "[INFO] DONE ${group} r${repeat}: duration_sec=${duration_sec}, last_step=${last_step:-N/A}, last_iter_ms_p50=${last_iter_ms_p50:-N/A}, unstable_run_flag=${unstable_run_flag}, iter_p90_over_p50=${iter_p90_over_p50:-N/A}" >&2
+    echo "[INFO] DONE ${group} r${repeat}: duration_sec=${duration_sec}, last_step=${last_step:-N/A}, last_iter_ms_p50=${last_iter_ms_p50:-N/A}, last_eta=${last_eta_hms:-N/A}(${last_eta_sec:-N/A}s), eta_mode=${last_eta_mode:-N/A}, unstable_run_flag=${unstable_run_flag}, iter_p90_over_p50=${iter_p90_over_p50:-N/A}" >&2
   fi
 }
 

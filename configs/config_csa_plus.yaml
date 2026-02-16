@@ -20,6 +20,9 @@ train:
   epochs: 100
   deterministic: true
   cudnn_benchmark: false
+  enable_eta_logging: true
+  eta_distributed_mode: rank0
+  eta_min_samples: 10
   data:
     num_workers: 2
     pin_memory: true
