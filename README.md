@@ -36,6 +36,10 @@ CSRef_2.0/
    ```
    conda install -y openmpi mpi4py
    ```
+4. (optional) flash-attn
+   ```
+   python -m pip install --use-pep517 --no-build-isolation flash-attn
+   ```
 
 ### docker
 
