@@ -92,6 +92,17 @@ Key policy (frozen mainline):
 - `ENABLE_TORCH_COMPILE=false`
 - `ENABLE_LENGTH_FIXED_SLICE=false`
 - `ENABLE_LENGTH_BUCKET=false`
+- `ENABLE_ETA_LOGGING=true`
+- `ETA_DISTRIBUTED_MODE=rank0` (low overhead default; use `global_max` for conservative distributed ETA)
+- `ETA_MIN_SAMPLES=10`
+
+ETA-related outputs:
+- `run_manifest.tsv` includes `last_eta_step`, `last_eta_remaining_steps`, `last_eta_sec`, `last_eta_hms`, `last_eta_mode`
+- `eta_points.csv` records run-level ETA trajectories
+
+Runtime notes for benchmarking:
+- if `deepspeed` is missing in current shell, run with `CONDA_ENV=csref_2` (or your env)
+- on hosts with NCCL peer-to-peer instability, add `NCCL_P2P_DISABLE=1` for distributed benchmark runs
 
 Optional diagnosis only:
 - `scripts/quick_leak_diagnose.py`

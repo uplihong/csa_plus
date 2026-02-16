@@ -1,5 +1,6 @@
 import os
 import time
+import math
 from collections import deque
 import torch
 import torch.distributed as dist
@@ -36,6 +37,13 @@ class Trainer:
         self.timing_rank_scope = str(getattr(cfg.train, "timing_rank_scope", "rank0")).lower()
         if self.timing_rank_scope not in {"rank0", "all"}:
             raise ValueError("train.timing_rank_scope must be one of: rank0, all")
+        self.enable_eta_logging = bool(getattr(cfg.train, "enable_eta_logging", True))
+        self.eta_distributed_mode = str(getattr(cfg.train, "eta_distributed_mode", "rank0")).lower()
+        if self.eta_distributed_mode not in {"rank0", "global_max"}:
+            raise ValueError("train.eta_distributed_mode must be one of: rank0, global_max")
+        self.eta_min_samples = int(getattr(cfg.train, "eta_min_samples", 10))
+        if self.eta_min_samples <= 0:
+            raise ValueError("train.eta_min_samples must be > 0")
         self.enable_torch_compile = bool(getattr(cfg.train, "enable_torch_compile", False))
         self.torch_compile_mode = str(getattr(cfg.train, "torch_compile_mode", "max-autotune"))
         self.torch_compile_dynamic = bool(getattr(cfg.train, "torch_compile_dynamic", True))
@@ -169,6 +177,12 @@ class Trainer:
                 self.timing_rank_scope,
             )
             logger.info(
+                "ETA options: enable_eta_logging=%s, eta_distributed_mode=%s, eta_min_samples=%s",
+                self.enable_eta_logging,
+                self.eta_distributed_mode,
+                self.eta_min_samples,
+            )
+            logger.info(
                 "Compile options: enable_torch_compile=%s, mode=%s, dynamic=%s",
                 self.enable_torch_compile,
                 self.torch_compile_mode,
@@ -253,12 +267,33 @@ class Trainer:
             # Logging
             should_log = (i % self.cfg.train.log_every_steps == 0)
             rank_snapshots = None
+            eta_snapshot = None
             if should_log:
                 rank_snapshots = self._gather_rank_timing_snapshot(step=i, loss=loss, step_timing=step_timing)
+                if self.enable_eta_logging:
+                    eta_basis_iter_ms = float(step_timing["iter_ms"])
+                    if self.eta_distributed_mode == "global_max":
+                        eta_basis_iter_ms = self._eta_allreduce_max(eta_basis_iter_ms)
+                    eta_snapshot = self._build_eta_snapshot(
+                        step=i,
+                        max_steps=max_steps,
+                        iter_ms_sample=eta_basis_iter_ms,
+                    )
 
             if should_log and is_rank_0():
                 logger.info(f"Step {i}: Loss {loss:.4f}")
                 logger.info(f"Timing(window={self.timing_window}): {self._timing_summary()}")
+                if eta_snapshot is not None:
+                    logger.info(
+                        "TimingETA step=%d remain_steps=%d eta_sec=%.1f eta_hms=%s mode=%s basis_iter_ms=%.2f samples=%d",
+                        eta_snapshot["step"],
+                        eta_snapshot["remain_steps"],
+                        eta_snapshot["eta_sec"],
+                        eta_snapshot["eta_hms"],
+                        eta_snapshot["mode"],
+                        eta_snapshot["basis_iter_ms"],
+                        eta_snapshot["samples"],
+                    )
                 if rank_snapshots is not None:
                     for item in rank_snapshots:
                         logger.info(
@@ -316,6 +351,57 @@ class Trainer:
     def _synchronize_cuda_for_timing(self, device: torch.device):
         if self.enable_cuda_sync_timing and torch.cuda.is_available():
             torch.cuda.synchronize(device)
+
+    def _eta_allreduce_max(self, value_ms: float) -> float:
+        if not dist.is_available() or not dist.is_initialized():
+            return float(value_ms)
+        backend = dist.get_backend()
+        if backend == "nccl" and torch.cuda.is_available():
+            if self.model_engine is not None:
+                device = self.model_engine.device
+            else:
+                device = torch.device("cuda", torch.cuda.current_device())
+        else:
+            device = torch.device("cpu")
+        value_tensor = torch.tensor(float(value_ms), dtype=torch.float64, device=device)
+        dist.all_reduce(value_tensor, op=dist.ReduceOp.MAX)
+        return float(value_tensor.item())
+
+    @staticmethod
+    def _format_eta_hms(seconds: float) -> str:
+        if seconds <= 0:
+            return "00:00:00"
+        total_seconds = int(math.ceil(seconds))
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        secs = total_seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+    def _build_eta_snapshot(self, step: int, max_steps: int, iter_ms_sample: float):
+        try:
+            sample_ms = float(iter_ms_sample)
+        except (TypeError, ValueError):
+            return None
+        if sample_ms <= 0:
+            return None
+        iter_history = list(self.step_timing_history["iter_ms"])
+        sample_count = len(iter_history)
+        if sample_count < self.eta_min_samples:
+            return None
+        remaining_steps = max(int(max_steps) - int(step), 0)
+        mean_iter_ms = float(sum(iter_history) / sample_count)
+        if self.eta_distributed_mode == "global_max":
+            mean_iter_ms = max(mean_iter_ms, sample_ms)
+        eta_sec = (remaining_steps * mean_iter_ms) / 1000.0
+        return {
+            "step": int(step),
+            "remain_steps": int(remaining_steps),
+            "eta_sec": float(eta_sec),
+            "eta_hms": self._format_eta_hms(float(eta_sec)),
+            "mode": self.eta_distributed_mode,
+            "basis_iter_ms": float(sample_ms),
+            "samples": int(sample_count),
+        }
 
     def _gather_rank_timing_snapshot(self, step: int, loss: float, step_timing: Dict[str, float]):
         if self.timing_rank_scope != "all":
