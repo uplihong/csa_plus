@@ -95,6 +95,9 @@ deepspeed \
   ++train.log_every_steps=20 \
   ++train.validation_every_steps=500 \
   ++train.checkpoint_every_steps=500 \
+  ++train.checkpoint_save_latest=true \
+  ++train.checkpoint_exclude_frozen_parameters=true \
+  ++train.checkpoint_tag_style=iter \
   ++train.deterministic=false \
   ++train.cudnn_benchmark=false \
   ++train.enable_cuda_sync_timing=false \
@@ -127,6 +130,21 @@ Startup artifacts (written to `experiment_output_dir`):
 - `resolved_config.yaml`: resolved Hydra configuration snapshot for run reproduction.
 - `run_context.json`: launch-time runtime context, including git commit/branch/dirty state and a bounded `git status --porcelain` summary.
 - if git working tree is dirty, training continues with a warning and the dirty state is recorded.
+
+Checkpointing (DeepSpeed official flow):
+- trainer calls `DeepSpeedEngine.save_checkpoint(save_dir, tag, client_state, save_latest, exclude_frozen_parameters)` on all ranks.
+- reference:
+  - https://deepspeed.readthedocs.io/en/latest/model-checkpointing.html
+  - https://deepspeed.readthedocs.io/en/stable/training.html
+- default config:
+  - `train.checkpoint_save_latest=true`
+  - `train.checkpoint_exclude_frozen_parameters=true` (recommended for multinode memory stability)
+  - `train.checkpoint_tag_style=iter`
+- output layout:
+  - checkpoint payload under `<run_dir>/<tag>/` (for example: `<run_dir>/iter_500/`)
+  - pointer file `<run_dir>/latest` tracks the newest tag when `checkpoint_save_latest=true`.
+- if strict full-parameter snapshots are needed for compatibility checks, override:
+  - `++train.checkpoint_exclude_frozen_parameters=false`
 
 Emergency fallback for platforms that cannot provide `pdsh`:
 - launch each node separately with DeepSpeed `--no_ssh`

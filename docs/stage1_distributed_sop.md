@@ -27,6 +27,9 @@ Use this policy unless you have a specific troubleshooting target.
 - `ENABLE_TORCH_COMPILE=false`
 - `ENABLE_LENGTH_FIXED_SLICE=false`
 - `ENABLE_LENGTH_BUCKET=false`
+- `CHECKPOINT_SAVE_LATEST=true`
+- `CHECKPOINT_EXCLUDE_FROZEN_PARAMETERS=true`
+- `CHECKPOINT_TAG_STYLE=iter`
 
 Mainline intent:
 - Maximize stable throughput with reproducible operations.
@@ -256,6 +259,9 @@ deepspeed \
   ++train.log_every_steps=20 \
   ++train.validation_every_steps=500 \
   ++train.checkpoint_every_steps=500 \
+  ++train.checkpoint_save_latest=true \
+  ++train.checkpoint_exclude_frozen_parameters=true \
+  ++train.checkpoint_tag_style=iter \
   ++train.deterministic=false \
   ++train.cudnn_benchmark=false \
   ++train.enable_cuda_sync_timing=false \
@@ -287,6 +293,15 @@ deepspeed \
 If platform orchestration cannot provide `pdsh`, use DeepSpeed `--no_ssh` mode
 with per-node launch and explicit `--node_rank/--master_addr/--master_port`.
 Reference: https://www.deepspeed.ai/getting-started/#launching-without-passwordless-ssh
+
+Checkpoint layout in this flow:
+- DeepSpeed saves under `<run_dir>/<tag>/` (for example `<run_dir>/iter_500/`)
+- when `checkpoint_save_latest=true`, `<run_dir>/latest` points to the newest saved tag
+- if strict full-parameter snapshots are required, override:
+  - `++train.checkpoint_exclude_frozen_parameters=false`
+- references:
+  - https://deepspeed.readthedocs.io/en/latest/model-checkpointing.html
+  - https://deepspeed.readthedocs.io/en/stable/training.html
 
 ## 4. Output Artifacts
 

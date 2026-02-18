@@ -11,7 +11,7 @@ from hydra.utils import instantiate
 from torch.utils.data import DataLoader
 
 from ..utils.logging_utils import setup_logger
-from ..utils.distributed import is_rank_0, save_zero_three_model, reduce_meters, get_rank
+from ..utils.distributed import is_rank_0, reduce_meters
 from ..utils.metric import AverageMeter
 from ..data.dataloader import InfiniteIterator
 from ..data.transforms import RandomAudioSlice
@@ -550,13 +550,49 @@ class Trainer:
 
     def save_checkpoint(self, step):
         logger.info(f"Saving checkpoint at step {step}...")
-        save_dir = os.path.join(self.cfg.experiment_output_dir, f"iter_{step}")
-        
-        ds_config = self.cfg.deepspeed_config_yaml
-        zero_stage = ds_config.get('zero_optimization', {}).get('stage', 0)
-        global_rank = get_rank()
-        
-        if zero_stage == 3:
-            save_zero_three_model(self.model_engine, global_rank, save_dir, zero_stage=3)
-        else:
-            self.model_engine.save_checkpoint(save_dir=save_dir, client_state={'step': step})
+
+        tag_style = str(getattr(self.cfg.train, "checkpoint_tag_style", "iter")).strip().lower()
+        if tag_style not in {"iter", "global_step"}:
+            if is_rank_0():
+                logger.warning(
+                    "Invalid train.checkpoint_tag_style=%s; fallback to iter",
+                    tag_style,
+                )
+            tag_style = "iter"
+        tag = f"iter_{step}" if tag_style == "iter" else f"global_step{step}"
+
+        save_latest = bool(getattr(self.cfg.train, "checkpoint_save_latest", True))
+        exclude_frozen_parameters = bool(
+            getattr(self.cfg.train, "checkpoint_exclude_frozen_parameters", True)
+        )
+        save_dir = self.cfg.experiment_output_dir
+        client_state = {"step": int(step)}
+
+        ds_config = (
+            OmegaConf.to_container(self.cfg.deepspeed_config_yaml, resolve=True)
+            if hasattr(self.cfg, "deepspeed_config_yaml")
+            else {}
+        )
+        zero_stage = int(ds_config.get("zero_optimization", {}).get("stage", 0))
+        world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
+
+        if is_rank_0():
+            logger.info(
+                "Checkpoint config: save_dir=%s tag=%s save_latest=%s "
+                "exclude_frozen_parameters=%s zero_stage=%d world_size=%d",
+                save_dir,
+                tag,
+                save_latest,
+                exclude_frozen_parameters,
+                zero_stage,
+                world_size,
+            )
+
+        # DeepSpeed requires all ranks to call save_checkpoint with a consistent tag.
+        self.model_engine.save_checkpoint(
+            save_dir=save_dir,
+            tag=tag,
+            client_state=client_state,
+            save_latest=save_latest,
+            exclude_frozen_parameters=exclude_frozen_parameters,
+        )

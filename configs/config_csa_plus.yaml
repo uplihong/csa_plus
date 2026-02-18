@@ -27,6 +27,9 @@ train:
   startup_metadata_config_filename: resolved_config.yaml
   startup_metadata_context_filename: run_context.json
   startup_metadata_git_max_status_lines: 200
+  checkpoint_save_latest: true
+  checkpoint_exclude_frozen_parameters: true
+  checkpoint_tag_style: iter
   data:
     num_workers: 2
     pin_memory: true
