@@ -123,6 +123,11 @@ deepspeed \
   2>&1 | tee "${OUT}/driver.log"
 ```
 
+Startup artifacts (written to `experiment_output_dir`):
+- `resolved_config.yaml`: resolved Hydra configuration snapshot for run reproduction.
+- `run_context.json`: launch-time runtime context, including git commit/branch/dirty state and a bounded `git status --porcelain` summary.
+- if git working tree is dirty, training continues with a warning and the dirty state is recorded.
+
 Emergency fallback for platforms that cannot provide `pdsh`:
 - launch each node separately with DeepSpeed `--no_ssh`
 - see: https://www.deepspeed.ai/getting-started/#launching-without-passwordless-ssh

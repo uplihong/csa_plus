@@ -23,6 +23,10 @@ train:
   enable_eta_logging: true
   eta_distributed_mode: rank0
   eta_min_samples: 10
+  startup_metadata_enabled: true
+  startup_metadata_config_filename: resolved_config.yaml
+  startup_metadata_context_filename: run_context.json
+  startup_metadata_git_max_status_lines: 200
   data:
     num_workers: 2
     pin_memory: true

@@ -6,6 +6,7 @@ from omegaconf import DictConfig, OmegaConf
 from csref.core.trainer import Trainer
 from csref.utils.distributed import seed_everything, is_rank_0
 from csref.utils.logging_utils import setup_logger, configure_project_loggers
+from csref.utils.startup_metadata import collect_startup_metadata, write_startup_artifacts
 
 logger = setup_logger(__name__)
 
@@ -103,6 +104,38 @@ def main(cfg: DictConfig):
             torch.backends.cudnn.benchmark = bool(cudnn_benchmark)
         if torch.backends.cudnn.deterministic and torch.backends.cudnn.benchmark:
             torch.backends.cudnn.benchmark = False
+
+    startup_metadata_enabled = bool(getattr(cfg.train, "startup_metadata_enabled", True))
+
+    startup_config_filename = str(
+        getattr(cfg.train, "startup_metadata_config_filename", "resolved_config.yaml")
+    ).strip()
+    if not startup_config_filename:
+        logger.warning("train.startup_metadata_config_filename is empty; fallback to resolved_config.yaml")
+        startup_config_filename = "resolved_config.yaml"
+
+    startup_context_filename = str(
+        getattr(cfg.train, "startup_metadata_context_filename", "run_context.json")
+    ).strip()
+    if not startup_context_filename:
+        logger.warning("train.startup_metadata_context_filename is empty; fallback to run_context.json")
+        startup_context_filename = "run_context.json"
+
+    startup_git_max_status_lines_raw = getattr(cfg.train, "startup_metadata_git_max_status_lines", 200)
+    try:
+        startup_git_max_status_lines = int(startup_git_max_status_lines_raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid train.startup_metadata_git_max_status_lines=%s; fallback to 200",
+            startup_git_max_status_lines_raw,
+        )
+        startup_git_max_status_lines = 200
+    if startup_git_max_status_lines < 0:
+        logger.warning(
+            "train.startup_metadata_git_max_status_lines=%s is invalid; fallback to 0",
+            startup_git_max_status_lines,
+        )
+        startup_git_max_status_lines = 0
     
     # Debug info
     if is_rank_0():
@@ -112,6 +145,50 @@ def main(cfg: DictConfig):
             str(getattr(cfg.train, "matmul_precision", "high")),
         )
         logger.info(f"Configuration:\n{OmegaConf.to_yaml(cfg)}")
+
+        if startup_metadata_enabled:
+            startup_context = collect_startup_metadata(
+                process_rank=process_rank,
+                local_rank=int(cfg.local_rank),
+                world_size=int(os.environ.get("WORLD_SIZE", "1")),
+                experiment_output_dir=cfg.experiment_output_dir,
+                repo_root=os.path.dirname(os.path.abspath(__file__)),
+                max_git_status_lines=startup_git_max_status_lines,
+            )
+            artifact_paths = write_startup_artifacts(
+                output_dir=cfg.experiment_output_dir,
+                cfg=cfg,
+                run_context=startup_context,
+                config_filename=startup_config_filename,
+                context_filename=startup_context_filename,
+                logger=logger,
+            )
+            if artifact_paths.get("resolved_config_path"):
+                logger.info("Startup metadata written: %s", artifact_paths["resolved_config_path"])
+            if artifact_paths.get("run_context_path"):
+                logger.info("Startup metadata written: %s", artifact_paths["run_context_path"])
+
+            git_info = startup_context.get("git", {})
+            if not git_info.get("available", False):
+                logger.warning(
+                    "Git metadata is unavailable at launch: %s",
+                    git_info.get("error", "unknown"),
+                )
+            elif git_info.get("error"):
+                logger.warning(
+                    "Git metadata collection completed with warning: %s",
+                    git_info.get("error"),
+                )
+            if git_info.get("dirty") is True:
+                dirty_files = len(git_info.get("status_porcelain") or [])
+                logger.warning(
+                    "Git working tree is dirty at launch (branch=%s commit=%s changed_files=%s). Training will continue.",
+                    git_info.get("branch", "unknown"),
+                    git_info.get("commit_short", "unknown"),
+                    dirty_files,
+                )
+        else:
+            logger.info("Startup metadata recording is disabled: train.startup_metadata_enabled=false")
     
     trainer = Trainer(cfg)
     trainer.setup()
