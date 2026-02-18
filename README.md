@@ -75,6 +75,60 @@ Multi-GPU:
 deepspeed --num_gpus 2 train.py +experiment=limit_longest_1-3_stage1_bf16
 ```
 
+Multi-node (scheduler + hostfile):
+
+```bash
+REPO=/code
+TS=$(date +%Y%m%d_%H%M%S)
+OUT=${REPO}/outputs/smoke_stage1_multinode_${TS}
+mkdir -p "${OUT}"
+cd "${REPO}"
+
+deepspeed \
+  --hostfile /etc/deepspeed/hostfile \
+  --launcher pdsh \
+  train.py \
+  +experiment=limit_longest_1-3_stage1_bf16 \
+  experiment_output_dir="${OUT}" \
+  hydra.run.dir="${OUT}" \
+  ++train.max_step_iterations=100000 \
+  ++train.log_every_steps=20 \
+  ++train.validation_every_steps=500 \
+  ++train.checkpoint_every_steps=500 \
+  ++train.deterministic=false \
+  ++train.cudnn_benchmark=false \
+  ++train.enable_cuda_sync_timing=false \
+  ++train.timing_rank_scope=rank0 \
+  ++train.enable_eta_logging=true \
+  ++train.eta_distributed_mode=rank0 \
+  ++train.eta_min_samples=10 \
+  ++train.data.num_workers=8 \
+  ++train.data.prefetch_factor=4 \
+  ++dataset.root_dir=data/LibriSpeech/LibriSpeech_16k_trim \
+  ++dataset.manifest_path=data/LibriSpeech/LibriSpeech_16k_trim/manifest_16k_trim.tsv \
+  ++dataset.use_trim=false \
+  ++dataset.offline_trimmed=true \
+  ++train.pretrained_model_checkpoint=data/weights/csa/ckpt_epoch_8.pth \
+  ++model.speech_encoder.pretrained_path=data/weights/wav2vec2-base \
+  ++model.text_encoder.pretrained_path=data/weights/bert-base-uncased \
+  ++model.speech_encoder.attn_implementation=eager \
+  ++model.text_encoder.attn_implementation=eager \
+  ++model.speech_encoder.torch_dtype=bf16 \
+  ++model.text_encoder.torch_dtype=bf16 \
+  deepspeed_config_yaml.zero_optimization.stage=0 \
+  deepspeed_config_yaml.train_micro_batch_size_per_gpu=128 \
+  deepspeed_config_yaml.wall_clock_breakdown=false \
+  deepspeed_config_yaml.bf16.enabled=true \
+  deepspeed_config_yaml.fp16.enabled=false \
+  2>&1 | tee "${OUT}/driver.log"
+```
+
+Emergency fallback for platforms that cannot provide `pdsh`:
+- launch each node separately with DeepSpeed `--no_ssh`
+- see: https://www.deepspeed.ai/getting-started/#launching-without-passwordless-ssh
+- if fused optimizer JIT is unavailable, add override:
+  - `deepspeed_config_yaml.optimizer.params.torch_adam=true`
+
 ## Stage1 Benchmarking (Mainline)
 
 Mainline benchmark entry:

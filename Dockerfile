@@ -3,6 +3,15 @@ FROM ${BASE_IMAGE}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
+# Install system dependencies required by DeepSpeed multi-node launcher
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       pdsh \
+       openssh-client \
+       ninja-build \
+       build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install runtime dependencies
 COPY requirements_docker.txt /tmp/requirements.txt
 RUN conda install -y gpustat \
