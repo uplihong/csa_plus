@@ -78,7 +78,7 @@ deepspeed --num_gpus 2 train.py +experiment=limit_longest_1-3_stage1_bf16
 Multi-node (scheduler + hostfile):
 
 ```bash
-REPO=/code
+REPO=/code/csa_plus
 TS=$(date +%Y%m%d_%H%M%S)
 OUT=${REPO}/outputs/smoke_stage1_multinode_${TS}
 mkdir -p "${OUT}"

@@ -242,7 +242,7 @@ This helper is for platform jobs that launch from a single master command with
 `/etc/deepspeed/hostfile`. It is not part of the single-node benchmark mainline.
 
 ```bash
-REPO=/code
+REPO=/code/csa_plus
 TS=$(date +%Y%m%d_%H%M%S)
 OUT=${REPO}/outputs/smoke_stage1_multinode_${TS}
 mkdir -p "${OUT}"
