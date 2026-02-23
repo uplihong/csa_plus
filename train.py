@@ -2,6 +2,7 @@ import os
 import sys
 import hydra
 import torch
+import torch.distributed as dist
 from omegaconf import DictConfig, OmegaConf
 from csref.core.trainer import Trainer
 from csref.utils.distributed import seed_everything, is_rank_0
@@ -73,6 +74,34 @@ def _configure_math_backend(cfg: DictConfig) -> None:
 
     cfg.train.enable_tf32 = bool(effective_tf32)
     cfg.train.matmul_precision = matmul_precision
+
+
+def _destroy_distributed_process_group() -> None:
+    """
+    Best-effort distributed cleanup for graceful process exit.
+    This reduces exit-time NCCL/TCPStore warning noise when the training loop
+    finishes normally.
+    """
+    if not dist.is_available() or not dist.is_initialized():
+        return
+
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    try:
+        dist.destroy_process_group()
+        logger.info(
+            "Destroyed torch.distributed process group on rank=%s/%s",
+            rank,
+            world_size,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to destroy torch.distributed process group on rank=%s/%s: %s",
+            rank,
+            world_size,
+            exc,
+        )
+
 
 @hydra.main(config_path="configs", config_name="config_csa_plus", version_base="1.3.2")
 def main(cfg: DictConfig):
@@ -191,8 +220,11 @@ def main(cfg: DictConfig):
             logger.info("Startup metadata recording is disabled: train.startup_metadata_enabled=false")
     
     trainer = Trainer(cfg)
-    trainer.setup()
-    trainer.fit()
+    try:
+        trainer.setup()
+        trainer.fit()
+    finally:
+        _destroy_distributed_process_group()
 
 if __name__ == "__main__":
     _normalize_local_rank_arg()
