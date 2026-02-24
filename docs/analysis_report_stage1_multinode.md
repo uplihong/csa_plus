@@ -179,10 +179,10 @@ deepspeed \
   +experiment=limit_longest_1-3_stage1_bf16 \
   experiment_output_dir="${OUT}" \
   hydra.run.dir="${OUT}" \
-  ++train.max_step_iterations=300 \
+  ++train.max_step_iterations=1000 \
   ++train.log_every_steps=20 \
-  ++train.validation_every_steps=1000000 \
-  ++train.checkpoint_every_steps=1000000 \
+  ++train.validation_every_steps=500 \
+  ++train.checkpoint_every_steps=500 \
   ++train.checkpoint_save_latest=true \
   ++train.checkpoint_exclude_frozen_parameters=true \
   ++train.checkpoint_tag_style=iter \
@@ -195,6 +195,7 @@ deepspeed \
   ++train.eta_min_samples=10 \
   ++train.data.num_workers=8 \
   ++train.data.prefetch_factor=4 \
+  ++train.evaluation.eval_batch_size=64 \
   ++dataset.root_dir=data/LibriSpeech/LibriSpeech_16k_trim \
   ++dataset.manifest_path=data/LibriSpeech/LibriSpeech_16k_trim/manifest_16k_trim.tsv \
   ++dataset.use_trim=false \
@@ -207,7 +208,7 @@ deepspeed \
   ++model.speech_encoder.torch_dtype=bf16 \
   ++model.text_encoder.torch_dtype=bf16 \
   deepspeed_config_yaml.zero_optimization.stage=0 \
-  deepspeed_config_yaml.train_micro_batch_size_per_gpu=128 \
+  deepspeed_config_yaml.train_micro_batch_size_per_gpu=64 \
   deepspeed_config_yaml.wall_clock_breakdown=false \
   deepspeed_config_yaml.bf16.enabled=true \
   deepspeed_config_yaml.fp16.enabled=false \
@@ -225,6 +226,29 @@ rg -n "destroy_process_group\\(\\) was not called|recvValue failed|Failed to che
 - 至少出现 `Reached max steps. Stopping.` 与各 rank `Process ... exits successfully`。
 - 不再出现 `destroy_process_group() was not called`。
 - `TCPStore recvValue failed` 与 `should dump flag` 告警应消失；若偶发残留，需对比历史 run 频次确认显著下降。
+
+### 实验 3 验证结果（已完成）
+- 实验目录：`outputs/verify_pg_destroy_20260224_074227`
+- 运行版本：`fix/destroy_process_group@ff0f603`
+- 分布式规模：`world_size=2`（2 节点 x 每节点 1 GPU），`micro_batch=64`，全局 batch=`128`
+- 训练配置：`max_step_iterations=1000`，`validation_every_steps=500`，`checkpoint_every_steps=500`
+
+关键结果：
+- 完成状态：正常到达 `Reached max steps. Stopping.`。
+- 收尾清理：出现 `Destroyed torch.distributed process group on rank=0/2`。
+- 进程退出：2/2 rank 均 `exits successfully`。
+- 告警计数（driver.log）：
+  - `destroy_process_group() was not called`: **0**
+  - `recvValue failed`: **0**
+  - `Failed to check the "should dump" flag on TCPStore`: **0**
+- 吞吐（step0->step1000）：
+  - `sec/iter = 0.2546`
+  - `iters/s = 3.9278`
+  - `samples/s (global batch=256) = 1005.5`
+
+结论：
+- 实验 3 目标达成。显式 `dist.destroy_process_group()` 后，先前在退出阶段出现的 NCCL/TCPStore 收尾噪声在该验证 run 中未复现。
+- 该改动不影响训练主流程完成性与 checkpoint/validation 路径，属于低风险稳定性增强。
 
 ---
 
